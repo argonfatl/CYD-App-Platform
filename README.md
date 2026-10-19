@@ -6,7 +6,7 @@ CYD App Platform is an open-source application platform for the ESP32 Cheap Yell
 
 ## Project status
 
-🚧 **Early prototype.** The repository contains an ESP-IDF launcher skeleton plus loadable Hello World and Clock ELF examples. The Hello World lifecycle has been confirmed on a physical CYD; Clock is the next runtime test.
+🚧 **Early prototype.** The Hello World ELF lifecycle has been confirmed on a physical CYD. The current Clock prototype adds a 320x240 landscape UI on the common ILI9341-based CYD while a Clock ELF module runs.
 
 ## Goals
 
@@ -18,13 +18,13 @@ CYD App Platform is an open-source application platform for the ESP32 Cheap Yell
 - Distinguish community-added apps from apps reviewed and approved for the official catalog.
 - Support a standard exit flow back to the launcher, with device restart as a fallback.
 - Validate downloaded packages and preserve user data during updates.
-- Target the common 2.8-inch CYD class (320×240 landscape UI), while documenting hardware variants explicitly.
+- Target the common 2.8-inch CYD class (320x240 landscape UI), while documenting hardware variants explicitly.
 
 ## Current prototype
 
-The prototype uses ESP-IDF and Espressif's ELF Loader as a candidate runtime. Both Hello World and Clock are built as ELF modules; the build script keeps Hello World as a build regression check and embeds Clock in the launcher.
+The prototype uses ESP-IDF and Espressif's ELF Loader as a candidate runtime. Hello World is kept as a build regression check; Clock is embedded in the launcher.
 
-The current Clock example prints elapsed time in `HH:MM:SS` once per second for ten seconds, then returns control to the launcher. It does not yet use wall-clock time or draw on the CYD display.
+The launcher initializes the ILI9341 display using the common 2.8-inch CYD pin mapping and renders a digital elapsed-time screen while the Clock ELF module runs for 30 seconds. When the module returns, the screen status changes to `APP FINISHED`. The displayed counter is elapsed time since boot, not wall-clock time; Wi-Fi/NTP and an app display SDK are future steps.
 
 To build locally from a shell with ESP-IDF activated:
 
@@ -32,9 +32,9 @@ To build locally from a shell with ESP-IDF activated:
 ./tools/build-elf-prototype.sh
 ```
 
-GitHub Actions runs this build on pushes, pull requests, and manual runs. Successful runs publish a `cyd-app-platform-elf-prototype` artifact containing the merged firmware binary and ELF outputs.
+GitHub Actions builds the Hello World and Clock ELF modules, the launcher firmware, and the merged flashable binary. Successful runs publish a `cyd-app-platform-elf-prototype` artifact.
 
-This is a runtime experiment, not yet a finished launcher. It does not yet include the display UI, filesystem-based app installation, app SDK, or GitHub manager.
+This is a runtime experiment, not yet a finished launcher. It does not yet include filesystem-based app installation, a full app SDK, or GitHub manager.
 
 ## Planned architecture
 
