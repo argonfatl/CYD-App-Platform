@@ -20,6 +20,8 @@ Every app is an ordinary, complete ESP32 firmware image (Arduino or ESP-IDF).
 
 The launcher works with touch or with the **BOOT** button alone: short press moves to the next item, long press opens it.
 
+If touches land in the wrong place, open the **Touch Setup** app from the launcher. It calibrates the screen once for the launcher and all apps. See [apps/touch-calibration](apps/touch-calibration/README.md).
+
 ## Updating the launcher over Wi-Fi
 
 1. Put a `wifi.json` file in the root of the SD card:
@@ -49,9 +51,10 @@ Push a tag such as `v0.2.0`. CI builds the firmware with that version and publis
 ## Repository layout
 
 - `firmware/launcher/` — the launcher, its partition table, and the bootloader hook.
-- `components/cyd_board/` — display (stripe renderer, no full framebuffer), touch, SD, and button support. Pins, panel orientation, color inversion, and touch calibration are constants in `include/cyd_board.h`.
+- `components/cyd_board/` — display (stripe renderer, no full framebuffer), touch, SD, and button support. Pins, panel orientation, color inversion, and default touch calibration are constants in `include/cyd_board.h`.
 - `components/cyd_platform/` — the small API apps use to return to the launcher.
 - `sdk/arduino/` — a single header for Arduino-ESP32 apps.
+- `apps/touch-calibration/` — Touch Setup, the system app that calibrates the touch screen.
 - `apps/examples/hello-app/` — a minimal example app.
 - `docs/` — architecture notes and decision records.
 

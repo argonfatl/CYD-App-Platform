@@ -1,0 +1,8 @@
+{
+  "id": "touch-calibration",
+  "name": "Touch Setup",
+  "version": "0.1.0",
+  "sdk": 1,
+  "binary": "app.bin",
+  "description": "Calibrates the touch screen for the launcher and all apps."
+}

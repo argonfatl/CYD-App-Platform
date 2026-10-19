@@ -2,12 +2,19 @@
 
 #include "driver/gpio.h"
 #include "esp_check.h"
+#include "esp_log.h"
 #include "esp_rom_sys.h"
+
+#include <string.h>
+
+#include "cyd_platform.h"
 
 #define Z_THRESHOLD 400
 #define SAMPLES     4
 
 static const char *TAG = "cyd_touch";
+
+static float s_cal[6];
 
 static void bit_delay(void)
 {
@@ -53,18 +60,19 @@ esp_err_t cyd_touch_init(void)
 
     gpio_set_level(CYD_TOUCH_PIN_CS, 1);
     gpio_set_level(CYD_TOUCH_PIN_CLK, 0);
+
+    cyd_touch_cal_t cal;
+    if (cyd_platform_get_touch_calibration(&cal)) {
+        cyd_touch_set_calibration(cal.m);
+        ESP_LOGI(TAG, "Using saved touch calibration");
+    } else {
+        cyd_touch_get_default_calibration(s_cal);
+        ESP_LOGI(TAG, "Touch not calibrated; using defaults");
+    }
     return ESP_OK;
 }
 
-static int map_range(int value, int in_min, int in_max, int out_max)
-{
-    int out = (value - in_min) * out_max / (in_max - in_min);
-    if (out < 0) return 0;
-    if (out >= out_max) return out_max - 1;
-    return out;
-}
-
-bool cyd_touch_read(int *x, int *y)
+bool cyd_touch_read_raw(int *raw_x, int *raw_y)
 {
     gpio_set_level(CYD_TOUCH_PIN_CS, 0);
 
@@ -87,22 +95,59 @@ bool cyd_touch_read(int *x, int *y)
     if (!pressed) {
         return false;
     }
+    *raw_x = sum_x / SAMPLES;
+    *raw_y = sum_y / SAMPLES;
+    return true;
+}
 
-    int raw_x = sum_x / SAMPLES;
-    int raw_y = sum_y / SAMPLES;
+void cyd_touch_get_default_calibration(float m[6])
+{
+    /* Scale each raw axis onto a screen axis, then apply swap and mirroring. */
+    float sx = (float)CYD_LCD_H_RES / (CYD_TOUCH_RAW_X_MAX - CYD_TOUCH_RAW_X_MIN);
+    float sy = (float)CYD_LCD_V_RES / (CYD_TOUCH_RAW_Y_MAX - CYD_TOUCH_RAW_Y_MIN);
+    float x_from_rx = 0, x_from_ry = 0, x_off, y_from_rx = 0, y_from_ry = 0, y_off;
 #if CYD_TOUCH_SWAP_XY
-    int tmp = raw_x; raw_x = raw_y; raw_y = tmp;
+    x_from_ry = sx; x_off = -CYD_TOUCH_RAW_X_MIN * sx;
+    y_from_rx = sy; y_off = -CYD_TOUCH_RAW_Y_MIN * sy;
+#else
+    x_from_rx = sx; x_off = -CYD_TOUCH_RAW_X_MIN * sx;
+    y_from_ry = sy; y_off = -CYD_TOUCH_RAW_Y_MIN * sy;
 #endif
-    int sx = map_range(raw_x, CYD_TOUCH_RAW_X_MIN, CYD_TOUCH_RAW_X_MAX, CYD_LCD_H_RES);
-    int sy = map_range(raw_y, CYD_TOUCH_RAW_Y_MIN, CYD_TOUCH_RAW_Y_MAX, CYD_LCD_V_RES);
 #if CYD_TOUCH_INVERT_X
-    sx = CYD_LCD_H_RES - 1 - sx;
+    x_from_rx = -x_from_rx; x_from_ry = -x_from_ry; x_off = CYD_LCD_H_RES - 1 - x_off;
 #endif
 #if CYD_TOUCH_INVERT_Y
-    sy = CYD_LCD_V_RES - 1 - sy;
+    y_from_rx = -y_from_rx; y_from_ry = -y_from_ry; y_off = CYD_LCD_V_RES - 1 - y_off;
 #endif
-    *x = sx;
-    *y = sy;
+    m[0] = x_from_rx; m[1] = x_from_ry; m[2] = x_off;
+    m[3] = y_from_rx; m[4] = y_from_ry; m[5] = y_off;
+}
+
+void cyd_touch_set_calibration(const float m[6])
+{
+    memcpy(s_cal, m, sizeof(s_cal));
+}
+
+void cyd_touch_get_calibration(float m[6])
+{
+    memcpy(m, s_cal, sizeof(s_cal));
+}
+
+static int clamp(int v, int max)
+{
+    if (v < 0) return 0;
+    if (v >= max) return max - 1;
+    return v;
+}
+
+bool cyd_touch_read(int *x, int *y)
+{
+    int rx, ry;
+    if (!cyd_touch_read_raw(&rx, &ry)) {
+        return false;
+    }
+    *x = clamp((int)(s_cal[0] * rx + s_cal[1] * ry + s_cal[2] + 0.5f), CYD_LCD_H_RES);
+    *y = clamp((int)(s_cal[3] * rx + s_cal[4] * ry + s_cal[5] + 0.5f), CYD_LCD_V_RES);
     return true;
 }
 

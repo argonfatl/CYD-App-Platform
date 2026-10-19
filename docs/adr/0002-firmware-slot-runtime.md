@@ -29,7 +29,7 @@ Every app is an ordinary, complete ESP32 firmware image. The platform switches b
 |-----------|------------------|------------|----------|--------------------------------------------|
 | `nvs`     | data / nvs       | `0x9000`   | 20 KB    | Shared NVS (Wi-Fi credentials, settings)   |
 | `otadata` | data / ota       | `0xE000`   | 8 KB     | Selects `factory` or `ota_0`               |
-| `cydcfg`  | data / `0x40`    | `0x10000`  | 4 KB     | Boot policy read by the bootloader hook    |
+| `cydcfg`  | data / `0x40`    | `0x10000`  | 4 KB     | Boot policy and touch calibration          |
 | `factory` | app / factory    | `0x20000`  | 1.25 MB  | Launcher                                   |
 | `ota_0`   | app / ota_0      | `0x160000` | 2.625 MB | The currently installed app                |
 
