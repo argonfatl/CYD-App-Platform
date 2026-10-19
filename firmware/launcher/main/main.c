@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_attr.h"
+#include "esp_check.h"
 #include "esp_elf.h"
 #include "esp_err.h"
 #include "esp_idf_version.h"
