@@ -8,6 +8,6 @@ From the repository root, after installing ESP-IDF and exporting its environment
 ./tools/build-elf-prototype.sh
 ```
 
-The script builds this module, copies the generated `cyd_hello_world.app.elf` into the launcher build as an embedded test asset, then builds the launcher firmware.
+The build script compiles this module as a regression check, then builds the Clock module and embeds Clock in the launcher firmware.
 
-The first prototype embeds the module in the firmware to keep the test small and deterministic. Once load/unload works, the next step is to load modules from a filesystem instead.
+The first prototype embeds a module in the firmware to keep the test deterministic. Once app load/unload works reliably, the next step is to load modules from a filesystem instead.

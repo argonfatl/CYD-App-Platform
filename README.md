@@ -6,9 +6,7 @@ CYD App Platform is an open-source application platform for the ESP32 Cheap Yell
 
 ## Project status
 
-🚧 **Early prototype.** The repository contains an ESP-IDF launcher skeleton and a Hello World ELF module. The first goal is to validate loading and unloading an app module before building the display UI, app catalog, or web manager.
-
-The GitHub Actions workflow builds the ELF module and launcher firmware on pushes, pull requests, and manual runs. Successful builds publish downloadable artifacts.
+🚧 **Early prototype.** The repository contains an ESP-IDF launcher skeleton plus loadable Hello World and Clock ELF examples. The Hello World lifecycle has been confirmed on a physical CYD; Clock is the next runtime test.
 
 ## Goals
 
@@ -24,7 +22,9 @@ The GitHub Actions workflow builds the ELF module and launcher firmware on pushe
 
 ## Current prototype
 
-The prototype uses ESP-IDF and Espressif's ELF Loader as a candidate runtime. The Hello World module is built separately as an ELF app, then embedded in the launcher firmware for the first deterministic load/unload test.
+The prototype uses ESP-IDF and Espressif's ELF Loader as a candidate runtime. Both Hello World and Clock are built as ELF modules; the build script keeps Hello World as a build regression check and embeds Clock in the launcher.
+
+The current Clock example prints elapsed time in `HH:MM:SS` once per second for ten seconds, then returns control to the launcher. It does not yet use wall-clock time or draw on the CYD display.
 
 To build locally from a shell with ESP-IDF activated:
 
@@ -32,9 +32,9 @@ To build locally from a shell with ESP-IDF activated:
 ./tools/build-elf-prototype.sh
 ```
 
-Alternatively, open the **Actions** tab in GitHub and run or inspect **Build CYD App Platform prototype**. Successful runs upload a `cyd-app-platform-elf-prototype` artifact.
+GitHub Actions runs this build on pushes, pull requests, and manual runs. Successful runs publish a `cyd-app-platform-elf-prototype` artifact containing the merged firmware binary and ELF outputs.
 
-This is a runtime experiment, not yet a finished launcher. It does not yet include the display UI, filesystem-based app installation, SDK, or GitHub manager.
+This is a runtime experiment, not yet a finished launcher. It does not yet include the display UI, filesystem-based app installation, app SDK, or GitHub manager.
 
 ## Planned architecture
 

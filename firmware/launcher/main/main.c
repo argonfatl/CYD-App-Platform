@@ -9,7 +9,7 @@
 
 static const char *TAG = "cyd-platform";
 
-extern const uint8_t hello_world_elf_start[] asm("_binary_hello_world_app_elf_start");
+extern const uint8_t clock_elf_start[] asm("_binary_clock_app_elf_start");
 
 void app_main(void)
 {
@@ -17,7 +17,7 @@ void app_main(void)
     int ret;
 
     ESP_LOGI(TAG, "CYD App Platform booted");
-    ESP_LOGI(TAG, "Starting embedded Hello World ELF prototype");
+    ESP_LOGI(TAG, "Starting embedded Clock ELF prototype");
 
     ret = esp_elf_init(&elf);
     if (ret < 0) {
@@ -25,19 +25,19 @@ void app_main(void)
         return;
     }
 
-    ret = esp_elf_relocate(&elf, hello_world_elf_start);
+    ret = esp_elf_relocate(&elf, clock_elf_start);
     if (ret < 0) {
         ESP_LOGE(TAG, "esp_elf_relocate failed: %d", ret);
         esp_elf_deinit(&elf);
         return;
     }
 
-    ESP_LOGI(TAG, "ELF loaded; transferring control to app module");
+    ESP_LOGI(TAG, "Clock ELF loaded; transferring control to app module");
     esp_elf_request(&elf, 0, 0, NULL);
-    ESP_LOGI(TAG, "App module returned; unloading ELF");
+    ESP_LOGI(TAG, "Clock app returned; unloading ELF");
 
     esp_elf_deinit(&elf);
-    ESP_LOGI(TAG, "ELF unloaded; launcher core remains active");
+    ESP_LOGI(TAG, "Clock ELF unloaded; launcher core remains active");
 
     for (;;) {
         ESP_LOGI(TAG, "Launcher core alive; free heap: %" PRIu32 " bytes",

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-elf-prototype:
-    name: Build ELF app and launcher firmware
+    name: Build Clock ELF app and launcher firmware
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v5.4
@@ -24,7 +24,7 @@ jobs:
         run: |
           bash -c 'source "$IDF_PATH/export.sh" && idf.py --version && python --version'
 
-      - name: Build Hello World ELF and launcher firmware
+      - name: Build Hello World, Clock ELF, and launcher firmware
         run: |
           bash -c 'source "$IDF_PATH/export.sh" && ./tools/build-elf-prototype.sh'
 
@@ -35,6 +35,7 @@ jobs:
           path: |
             firmware/launcher/build/cyd-app-platform-full.bin
             apps/examples/hello-world/build/**/*.elf
+            apps/examples/clock/build/**/*.elf
             firmware/launcher/build/**/*.bin
             firmware/launcher/build/**/*.elf
             firmware/launcher/build/flasher_args.json
