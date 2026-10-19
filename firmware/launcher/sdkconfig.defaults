@@ -1,3 +1,13 @@
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# CYD App Platform layout: launcher in factory, apps in ota_0 (see docs/adr/0002).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Keep the launcher small so it fits the 896 KB factory partition.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# FAT long file names for app folders on the SD card.
+CONFIG_FATFS_LFN_HEAP=y

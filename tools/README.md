@@ -1,10 +1,9 @@
 # Developer tools
 
-Planned tooling:
+- `build.sh` — builds the launcher and example apps and assembles `dist/` (launcher image, SD card folder, checksums).
+
+Planned:
 
 - validate an app manifest;
-- package a compatible app build and assets;
-- calculate package hashes;
-- inspect target/runtime/API compatibility.
-
-The initial prototype will focus on runtime validation before implementing package tooling.
+- package third-party app releases;
+- inspect target and partition compatibility of an app image.
