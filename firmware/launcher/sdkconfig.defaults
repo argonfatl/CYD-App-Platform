@@ -14,5 +14,9 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 
+# The update runs TLS, the HTTP client, flash writes, and screen redraws on the
+# main task; the default 3.5 KB stack overflows during the download.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+
 # FAT long file names for app folders on the SD card.
 CONFIG_FATFS_LFN_HEAP=y

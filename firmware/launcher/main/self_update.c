@@ -13,6 +13,8 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mbedtls/sha256.h"
 #include "spi_flash_mmap.h"
 
@@ -178,7 +180,8 @@ static esp_err_t write_chunk(const void *data, int len, void *ctx)
     mbedtls_sha256_update(&d->sha, data, len);
     d->written += len;
 
-    int pct = (int)((uint64_t)d->written * 100 / d->expected);
+    /* Redraw every 2% to keep the download fast. */
+    int pct = (int)((uint64_t)d->written * 100 / d->expected) / 2 * 2;
     if (pct != d->last_pct && d->progress) {
         d->last_pct = pct;
         d->progress(NULL, pct);
@@ -238,6 +241,9 @@ esp_err_t self_update_download(const launcher_release_t *release, self_update_pr
     }
     mbedtls_sha256_free(&d->sha);
     free(d);
+    ESP_LOGI(TAG, "Download finished: %s; main stack headroom %u bytes, free heap %u bytes",
+             esp_err_to_name(err), (unsigned)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t),
+             (unsigned)esp_get_free_heap_size());
 
     if (err == ESP_OK) {
         esp_app_desc_t desc;
