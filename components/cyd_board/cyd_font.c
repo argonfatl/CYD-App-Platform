@@ -32,16 +32,18 @@ static const struct {
     {'(', {0x00,0x1C,0x22,0x41,0x00}}, {')', {0x00,0x41,0x22,0x1C,0x00}},
     {'%', {0x23,0x13,0x08,0x64,0x62}}, {'_', {0x40,0x40,0x40,0x40,0x40}},
     {'!', {0x00,0x00,0x5F,0x00,0x00}}, {'?', {0x02,0x01,0x51,0x09,0x06}},
+    {'+', {0x08,0x08,0x3E,0x08,0x08}}, {'v', {0x1C,0x20,0x40,0x20,0x1C}},
 };
 
 static const uint8_t *glyph_for(char c)
 {
-    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    if (c >= 'A' && c <= 'Z') return s_letters[c - 'A'];
-    if (c >= '0' && c <= '9') return s_digits[c - '0'];
+    /* Symbols first, so the few lower-case glyphs (like 'v') win over upper-case fallback. */
     for (size_t i = 0; i < sizeof(s_symbols) / sizeof(s_symbols[0]); ++i) {
         if (s_symbols[i].c == c) return s_symbols[i].cols;
     }
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    if (c >= 'A' && c <= 'Z') return s_letters[c - 'A'];
+    if (c >= '0' && c <= '9') return s_digits[c - '0'];
     return NULL; /* space and unknown characters render as blank */
 }
 
