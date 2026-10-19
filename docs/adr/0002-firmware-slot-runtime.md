@@ -1,6 +1,6 @@
 # ADR 0002: Use firmware slots for the v1 app runtime
 
-- **Status:** Accepted; hardware validation pending
+- **Status:** Accepted; hardware validation in progress
 - **Date:** 2026-10-19
 - **Supersedes:** [ADR 0001](0001-runtime-evaluation.md)
 
@@ -52,6 +52,8 @@ There is no SPIFFS/LittleFS partition. Apps keep their data in NVS (under their 
 - Apps must be built for the original ESP32 with a 4 MB flash layout and must not depend on a filesystem partition.
 
 ## Validation needed on hardware
+
+Confirmed so far: the launcher boots from `factory` with this partition table, mounts the SD card, and lists apps. Still to confirm:
 
 - Power-on and RST both report `RESET_REASON_CHIP_POWER_ON` on the CYD, so the bootloader hook returns to the launcher.
 - Touch calibration constants match the common 2.8-inch board; the BOOT button works as a fallback.
