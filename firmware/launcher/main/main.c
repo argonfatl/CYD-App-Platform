@@ -14,6 +14,8 @@
 #include "cJSON.h"
 #include "cyd_board.h"
 #include "cyd_platform.h"
+#include "launcher_wifi.h"
+#include "self_update.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -32,6 +34,7 @@
 #define VISIBLE_ROWS      4
 #define FOOTER_TOP        (LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT + 8)
 #define FOOTER_HEIGHT     22
+#define FOOTER_SPLIT      150
 #define STATUS_Y          (CYD_LCD_V_RES - 14)
 #define LONG_PRESS_US     700000
 #define COPY_CHUNK        4096
@@ -50,7 +53,7 @@ typedef struct {
 typedef struct {
     app_entry_t apps[MAX_APPS];
     int count;
-    int selected;         /* 0..count-1 apps, count = settings row */
+    int selected;         /* 0..count-1 apps, count = power-on setting, count+1 = update */
     int scroll;
     bool sd_ok;
     bool keep_app;
@@ -59,6 +62,8 @@ typedef struct {
     uint16_t status_color;
     int progress;         /* -1 = hidden, 0..100 */
     char progress_label[48];
+    bool update_ready;    /* a newer release was found and can be installed */
+    launcher_release_t release;
 } launcher_t;
 
 static launcher_t s_ui;
@@ -151,13 +156,23 @@ static void nvs_get_str_default(nvs_handle_t h, const char *key, char *dst, size
     }
 }
 
+static const esp_partition_t *app_slot(void)
+{
+    return esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+}
+
+/* The record also stores the slot address, so it is ignored after a partition table change. */
 static void load_installed(char *id, size_t id_len, char *sha, size_t sha_len)
 {
     nvs_handle_t h;
     id[0] = sha[0] = '\0';
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_str_default(h, "slot_id", id, id_len);
-        nvs_get_str_default(h, "slot_sha", sha, sha_len);
+        uint32_t addr = 0;
+        const esp_partition_t *slot = app_slot();
+        if (nvs_get_u32(h, "slot_addr", &addr) == ESP_OK && slot && addr == slot->address) {
+            nvs_get_str_default(h, "slot_id", id, id_len);
+            nvs_get_str_default(h, "slot_sha", sha, sha_len);
+        }
         nvs_close(h);
     }
 }
@@ -165,9 +180,11 @@ static void load_installed(char *id, size_t id_len, char *sha, size_t sha_len)
 static void save_installed(const char *id, const char *sha)
 {
     nvs_handle_t h;
+    const esp_partition_t *slot = app_slot();
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_str(h, "slot_id", id);
         nvs_set_str(h, "slot_sha", sha);
+        nvs_set_u32(h, "slot_addr", slot ? slot->address : 0);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -218,11 +235,23 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
         }
     }
 
-    /* Settings row */
-    bool settings_sel = (s_ui.selected == s_ui.count);
-    cyd_fill_rect(c, 6, FOOTER_TOP, CYD_LCD_H_RES - 12, FOOTER_HEIGHT, settings_sel ? CYD_AMBER : CYD_PANEL);
-    cyd_draw_text(c, s_ui.keep_app ? "POWER-ON STARTS: LAST APP" : "POWER-ON STARTS: LAUNCHER",
-                  14, FOOTER_TOP + 7, 1, settings_sel ? CYD_BLACK : CYD_WHITE);
+    /* Footer: power-on setting (left) and launcher update (right). */
+    bool power_sel = (s_ui.selected == s_ui.count);
+    cyd_fill_rect(c, 6, FOOTER_TOP, FOOTER_SPLIT - 9, FOOTER_HEIGHT, power_sel ? CYD_AMBER : CYD_PANEL);
+    cyd_draw_text(c, s_ui.keep_app ? "POWER-ON: LAST APP" : "POWER-ON: LAUNCHER",
+                  14, FOOTER_TOP + 7, 1, power_sel ? CYD_BLACK : CYD_WHITE);
+
+    bool update_sel = (s_ui.selected == s_ui.count + 1);
+    char update_text[40];
+    if (s_ui.update_ready) {
+        snprintf(update_text, sizeof(update_text), "INSTALL %s", s_ui.release.version);
+    } else {
+        snprintf(update_text, sizeof(update_text), "CHECK UPDATE");
+    }
+    uint16_t update_bg = update_sel ? CYD_AMBER : (s_ui.update_ready ? CYD_GREEN : CYD_PANEL);
+    cyd_fill_rect(c, FOOTER_SPLIT + 3, FOOTER_TOP, CYD_LCD_H_RES - FOOTER_SPLIT - 9, FOOTER_HEIGHT, update_bg);
+    cyd_draw_text(c, update_text, FOOTER_SPLIT + 11, FOOTER_TOP + 7, 1,
+                  (update_sel || s_ui.update_ready) ? CYD_BLACK : CYD_WHITE);
 
     cyd_draw_text(c, s_ui.status, 10, STATUS_Y, 1, s_ui.status_color);
 }
@@ -330,8 +359,7 @@ static void fail(const char *message, esp_err_t err)
 
 static void launch_app(const app_entry_t *app)
 {
-    const esp_partition_t *slot = esp_partition_find_first(
-        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    const esp_partition_t *slot = app_slot();
     if (slot == NULL) {
         fail("NO APP SLOT IN PARTITION TABLE", ESP_ERR_NOT_FOUND);
         return;
@@ -343,7 +371,7 @@ static void launch_app(const app_entry_t *app)
         return;
     }
     if ((size_t)st.st_size > slot->size) {
-        fail("APP TOO BIG FOR 3 MB SLOT", ESP_ERR_INVALID_SIZE);
+        fail("APP TOO BIG FOR THE APP SLOT", ESP_ERR_INVALID_SIZE);
         return;
     }
 
@@ -395,11 +423,79 @@ static void launch_app(const app_entry_t *app)
     esp_restart();
 }
 
+/* ---------- Launcher self-update ---------- */
+
+static void on_progress(const char *label, int percent)
+{
+    set_progress(label, percent);
+}
+
+static void update_launcher(void)
+{
+    if (!launcher_wifi_configured()) {
+        set_status("ADD /WIFI.JSON TO THE SD CARD", CYD_AMBER);
+        redraw();
+        return;
+    }
+
+    set_progress("CONNECTING TO WI-FI", 0);
+    esp_err_t err = launcher_wifi_connect(20000);
+    if (err != ESP_OK) {
+        fail("WI-FI CONNECTION FAILED", err);
+        return;
+    }
+
+    if (!s_ui.update_ready) {
+        set_progress("CHECKING GITHUB", 0);
+        launcher_release_t release;
+        err = self_update_check(&release);
+        s_ui.progress = -1;
+        if (err == ESP_ERR_NOT_FOUND) {
+            fail("NO LAUNCHER RELEASE FOUND", err);
+            return;
+        }
+        if (err != ESP_OK) {
+            fail("UPDATE CHECK FAILED", err);
+            return;
+        }
+        const char *current = esp_app_get_description()->version;
+        if (!self_update_is_newer(release.version, current)) {
+            char text[48];
+            snprintf(text, sizeof(text), "UP TO DATE (%.24s)", release.version);
+            set_status(text, CYD_GREEN);
+            redraw();
+            return;
+        }
+        s_ui.release = release;
+        s_ui.update_ready = true;
+        char text[48];
+        snprintf(text, sizeof(text), "%.16s READY - OPEN AGAIN TO INSTALL", release.version);
+        set_status(text, CYD_GREEN);
+        redraw();
+        return;
+    }
+
+    char label[48];
+    snprintf(label, sizeof(label), "DOWNLOADING %.24s", s_ui.release.version);
+    set_progress(label, 0);
+    save_installed("", ""); /* the app slot is used to stage the update */
+    s_ui.installed_id[0] = '\0';
+    err = self_update_download(&s_ui.release, on_progress);
+    if (err != ESP_OK) {
+        s_ui.update_ready = false;
+        fail("LAUNCHER DOWNLOAD FAILED", err);
+        return;
+    }
+    set_progress("RESTARTING TO INSTALL", 100);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+
 /* ---------- Input ---------- */
 
 static void select_item(int index)
 {
-    int total = s_ui.count + 1;
+    int total = s_ui.count + 2;
     s_ui.selected = (index % total + total) % total;
     if (s_ui.selected < s_ui.count) {
         if (s_ui.selected < s_ui.scroll) s_ui.scroll = s_ui.selected;
@@ -420,6 +516,10 @@ static void activate_selected(void)
         redraw();
         return;
     }
+    if (s_ui.selected == s_ui.count + 1) {
+        update_launcher();
+        return;
+    }
     if (s_ui.selected >= 0 && s_ui.selected < s_ui.count) {
         launch_app(&s_ui.apps[s_ui.selected]);
     }
@@ -428,8 +528,9 @@ static void activate_selected(void)
 /* Returns the item index under a touch point, or -1. */
 static int item_at(int x, int y)
 {
-    (void)x;
-    if (y >= FOOTER_TOP && y < FOOTER_TOP + FOOTER_HEIGHT) return s_ui.count;
+    if (y >= FOOTER_TOP && y < FOOTER_TOP + FOOTER_HEIGHT) {
+        return x < FOOTER_SPLIT ? s_ui.count : s_ui.count + 1;
+    }
     if (y >= LIST_TOP && y < LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT) {
         int i = s_ui.scroll + (y - LIST_TOP) / ROW_HEIGHT;
         if (i < s_ui.count) return i;
@@ -440,8 +541,12 @@ static int item_at(int x, int y)
 static void refresh_apps(void)
 {
     s_ui.sd_ok = cyd_sd_mount() == ESP_OK;
-    if (s_ui.sd_ok) scan_apps();
-    else s_ui.count = 0;
+    if (s_ui.sd_ok) {
+        scan_apps();
+        launcher_wifi_import_from_sd();
+    } else {
+        s_ui.count = 0;
+    }
     select_item(0);
 
     char sha[65];
@@ -461,6 +566,9 @@ void app_main(void)
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_touch_init());
     ESP_ERROR_CHECK(cyd_button_init());
+
+    /* If this is a freshly downloaded launcher running from ota_0, finish installing it. */
+    self_update_finish_if_staged(on_progress);
 
     s_ui.progress = -1;
     s_ui.keep_app = cyd_platform_get_keep_app_on_power_on();

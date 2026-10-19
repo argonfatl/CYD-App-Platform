@@ -6,7 +6,7 @@ CYD App Platform is an open-source launcher and app platform for the ESP32 Cheap
 
 ## Project status
 
-🚧 **Early prototype.** The firmware-slot launcher builds in CI and boots on a physical ESP32-2432S028R: it reads the SD card and lists apps from their manifests. Display mirroring and colors were corrected after that first test. Touch, installing and switching apps, and returning to the launcher are still being checked. See [ADR 0002](docs/adr/0002-firmware-slot-runtime.md) for the design and [docs/development.md](docs/development.md) for the hardware checklist.
+🚧 **Early prototype.** The firmware-slot launcher builds in CI and boots on a physical ESP32-2432S028R: it reads the SD card and lists apps from their manifests. Display, touch, the BOOT button, installing an app from SD, and returning to the launcher work on hardware. Launcher self-update over Wi-Fi is new and still being tested. See [ADR 0002](docs/adr/0002-firmware-slot-runtime.md) for the design and [docs/development.md](docs/development.md) for the hardware checklist.
 
 ## How it works
 
@@ -20,13 +20,31 @@ Every app is an ordinary, complete ESP32 firmware image (Arduino or ESP-IDF).
 
 The launcher works with touch or with the **BOOT** button alone: short press moves to the next item, long press opens it.
 
+## Updating the launcher over Wi-Fi
+
+1. Put a `wifi.json` file in the root of the SD card:
+
+   ```json
+   { "ssid": "MyNetwork", "password": "my-password" }
+   ```
+
+   The launcher copies it into its settings at startup.
+2. Select **CHECK UPDATE** at the bottom of the launcher. It connects to Wi-Fi and checks the latest release of this repository.
+3. If a newer version is found, the button changes to **INSTALL vX.Y.Z**. Open it again to download, verify, and install the update. The device restarts twice.
+
+The installed app is removed during an update and is reinstalled from the SD card the next time you open it. See [ADR 0003](docs/adr/0003-launcher-self-update.md) for details.
+
 ## Quick start
 
 1. Download `cyd-launcher-full.bin` and `cyd-sd-card.zip` from a CI run or release.
-2. Flash the launcher once, for example with `esptool.py write_flash 0x0 cyd-launcher-full.bin` or the [ESP Web Flasher](https://espressif.github.io/esptool-js/).
+2. Flash the launcher once over USB (later updates can be installed over Wi-Fi), for example with `esptool.py write_flash 0x0 cyd-launcher-full.bin` or the [ESP Web Flasher](https://espressif.github.io/esptool-js/).
 3. Unzip `cyd-sd-card.zip` to the root of a FAT32 microSD card and insert it.
 
 To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/development.md](docs/development.md).
+
+## Making a release
+
+Push a tag such as `v0.2.0`. CI builds the firmware with that version and publishes `cyd-launcher-full.bin` (USB flashing), `cyd-launcher.bin` and `cyd-launcher.json` (Wi-Fi self-update), `cyd-sd-card.zip`, and `SHA256SUMS`.
 
 ## Repository layout
 
@@ -41,7 +59,7 @@ To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/de
 
 Any firmware built for the original ESP32 with 4 MB flash can run, as long as it:
 
-- fits in the 3 MB app slot;
+- fits in the 2.6 MB app slot;
 - does not need its own SPIFFS/LittleFS partition (use NVS or the SD card for data);
 - uses its own NVS namespace, because NVS is shared with the launcher.
 
@@ -60,11 +78,12 @@ Add a `manifest.json` next to `app.bin`:
 
 ## Roadmap
 
-1. Validate the launcher, touch calibration, and power-on return on a physical CYD.
-2. Run [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) from the app slot.
-3. Wi-Fi setup screen and a shared settings store.
-4. Install and update apps from GitHub releases, with a trusted catalog of reviewed apps.
-5. Optional lightweight runtime (scripts or WebAssembly) for small apps that should switch instantly.
+1. ~~Validate the launcher on a physical CYD.~~ Done.
+2. ~~Launcher self-update from GitHub releases over Wi-Fi.~~ Done; awaiting hardware test.
+3. Run [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) from the app slot.
+4. Wi-Fi setup screen and a shared settings store.
+5. Install and update apps from GitHub releases, with a trusted catalog of reviewed apps.
+6. Optional lightweight runtime (scripts or WebAssembly) for small apps that should switch instantly.
 
 ## App trust and security
 

@@ -30,8 +30,10 @@ Every app is an ordinary, complete ESP32 firmware image. The platform switches b
 | `nvs`     | data / nvs       | `0x9000`   | 20 KB    | Shared NVS (Wi-Fi credentials, settings)   |
 | `otadata` | data / ota       | `0xE000`   | 8 KB     | Selects `factory` or `ota_0`               |
 | `cydcfg`  | data / `0x40`    | `0x10000`  | 4 KB     | Boot policy read by the bootloader hook    |
-| `factory` | app / factory    | `0x20000`  | 896 KB   | Launcher                                   |
-| `ota_0`   | app / ota_0      | `0x100000` | 3 MB     | The currently installed app                |
+| `factory` | app / factory    | `0x20000`  | 1.25 MB  | Launcher                                   |
+| `ota_0`   | app / ota_0      | `0x160000` | 2.625 MB | The currently installed app                |
+
+The factory partition was enlarged from 896 KB to 1.25 MB when the launcher gained Wi-Fi and HTTPS for self-updates ([ADR 0003](0003-launcher-self-update.md)); the app slot shrank from 3 MB accordingly.
 
 There is no SPIFFS/LittleFS partition. Apps keep their data in NVS (under their own namespace) or on the SD card.
 
@@ -39,7 +41,7 @@ There is no SPIFFS/LittleFS partition. Apps keep their data in NVS (under their 
 
 **Benefits**
 
-- Any Arduino or ESP-IDF firmware runs unmodified, with all RAM and the full 3 MB slot.
+- Any Arduino or ESP-IDF firmware runs unmodified, with all RAM and the full app slot.
 - No ABI to design or freeze before useful apps exist.
 - CI already produces exactly the artifact an app needs: a `.bin`.
 - Switching back to the same app is fast because flashing is skipped when the slot already holds it.
@@ -53,10 +55,9 @@ There is no SPIFFS/LittleFS partition. Apps keep their data in NVS (under their 
 
 ## Validation needed on hardware
 
-Confirmed so far: the launcher boots from `factory` with this partition table, mounts the SD card, and lists apps. Still to confirm:
+Confirmed so far: the launcher boots from `factory`, mounts the SD card, lists apps, installs an app into `ota_0` and boots it, and apps return to the launcher. Still to confirm:
 
 - Power-on and RST both report `RESET_REASON_CHIP_POWER_ON` on the CYD, so the bootloader hook returns to the launcher.
-- Touch calibration constants match the common 2.8-inch board; the BOOT button works as a fallback.
 - Time to flash a 1.5 MB app from SD.
 - CYD28PlaneSpotter runs from `ota_0` with this partition table.
 
