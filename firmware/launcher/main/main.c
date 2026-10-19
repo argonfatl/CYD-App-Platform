@@ -29,8 +29,10 @@
 #define MAX_APPS          16
 #define ROW_HEIGHT        34
 #define LIST_TOP          40
-#define VISIBLE_ROWS      5
-#define FOOTER_TOP        (LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT + 6)
+#define VISIBLE_ROWS      4
+#define FOOTER_TOP        (LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT + 8)
+#define FOOTER_HEIGHT     22
+#define STATUS_Y          (CYD_LCD_V_RES - 14)
 #define LONG_PRESS_US     700000
 #define COPY_CHUNK        4096
 #define NVS_NAMESPACE     "cyd_launcher"
@@ -218,11 +220,11 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
 
     /* Settings row */
     bool settings_sel = (s_ui.selected == s_ui.count);
-    cyd_fill_rect(c, 6, FOOTER_TOP, CYD_LCD_H_RES - 12, 20, settings_sel ? CYD_AMBER : CYD_PANEL);
+    cyd_fill_rect(c, 6, FOOTER_TOP, CYD_LCD_H_RES - 12, FOOTER_HEIGHT, settings_sel ? CYD_AMBER : CYD_PANEL);
     cyd_draw_text(c, s_ui.keep_app ? "POWER-ON STARTS: LAST APP" : "POWER-ON STARTS: LAUNCHER",
-                  14, FOOTER_TOP + 6, 1, settings_sel ? CYD_BLACK : CYD_WHITE);
+                  14, FOOTER_TOP + 7, 1, settings_sel ? CYD_BLACK : CYD_WHITE);
 
-    cyd_draw_text(c, s_ui.status, 10, CYD_LCD_V_RES - 12, 1, s_ui.status_color);
+    cyd_draw_text(c, s_ui.status, 10, STATUS_Y, 1, s_ui.status_color);
 }
 
 static void redraw(void)
@@ -427,7 +429,7 @@ static void activate_selected(void)
 static int item_at(int x, int y)
 {
     (void)x;
-    if (y >= FOOTER_TOP && y < FOOTER_TOP + 20) return s_ui.count;
+    if (y >= FOOTER_TOP && y < FOOTER_TOP + FOOTER_HEIGHT) return s_ui.count;
     if (y >= LIST_TOP && y < LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT) {
         int i = s_ui.scroll + (y - LIST_TOP) / ROW_HEIGHT;
         if (i < s_ui.count) return i;

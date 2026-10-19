@@ -26,6 +26,11 @@ extern "C" {
 #define CYD_LCD_PIN_DC       2
 #define CYD_LCD_PIN_BL       21
 
+/* Panel settings for the ESP32-2432S028R (ILI9341). Some batches need inverted colors. */
+#define CYD_LCD_INVERT_COLORS false
+#define CYD_LCD_MIRROR_X      false
+#define CYD_LCD_MIRROR_Y      false
+
 /* Touch: XPT2046, bit-banged because both hardware SPI hosts are in use. */
 #define CYD_TOUCH_PIN_CLK    25
 #define CYD_TOUCH_PIN_MOSI   32
