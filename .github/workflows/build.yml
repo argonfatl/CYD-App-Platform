@@ -25,6 +25,13 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Compiler cache: most of the build is ESP-IDF itself, which rarely changes.
+      IDF_CCACHE_ENABLE: 1
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 600M
+      # Absolute paths differ between checkouts only by workspace; hash relative to it.
+      CCACHE_BASEDIR: ${{ github.workspace }}
 
     steps:
       - name: Check out repository
@@ -38,11 +45,24 @@ jobs:
         # container the checkout is owned by another user.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Restore compiler cache
+        # Tag and pull-request builds can reuse the cache saved by main.
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-idf-v5.4.2-${{ github.sha }}
+          restore-keys: ccache-idf-v5.4.2-
+
+      - name: Make sure ccache is available
+        run: command -v ccache || (apt-get update -qq && apt-get install -y -qq ccache)
+
       - name: Build launcher and apps
         run: |
           source "$IDF_PATH/export.sh"
           idf.py --version
+          ccache --zero-stats
           ./tools/build.sh
+          ccache --show-stats
 
       - name: Package the SD card folder
         run: cd dist/sd && python3 -m zipfile -c ../cyd-sd-card.zip apps
