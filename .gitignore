@@ -5,6 +5,9 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
+# Generated ELF embedded by tools/build-elf-prototype.sh
+firmware/launcher/main/hello_world.app.elf
+
 # IDE and operating system files
 .vscode/
 .idea/

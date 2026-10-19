@@ -2,26 +2,39 @@
 
 ## Target
 
-The initial target is the common 2.8-inch CYD with the original ESP32 and a 320x240 landscape UI. CYD boards have hardware variants; confirm the exact display driver and pin mapping before enabling display code.
+The initial target is the common 2.8-inch CYD with the original ESP32 and a 320×240 landscape UI. CYD boards have hardware variants; confirm the exact display driver and pin mapping before enabling display code.
 
 ## Toolchain
 
-The platform prototype will use ESP-IDF because the leading app-loader candidate is an ESP-IDF component. Arduino libraries may be integrated later if needed, but app modules must not assume the full Arduino environment is available inside a dynamically loaded ELF.
+The prototype uses ESP-IDF because the leading app-loader candidate is an ESP-IDF component. Arduino libraries may be integrated later if needed, but app modules must not assume the full Arduino environment is available inside a dynamically loaded ELF.
 
-Install ESP-IDF using Espressif's official setup instructions, then build the launcher from `firmware/launcher`:
+Install ESP-IDF using Espressif's official setup instructions and activate its environment in your shell.
+
+## Build the runtime prototype
+
+From the repository root:
 
 ```sh
-idf.py set-target esp32
-idf.py build
+./tools/build-elf-prototype.sh
 ```
 
-Flash and monitor commands will be documented after the first build is validated on the target board.
+The script builds the Hello World ELF app, embeds the generated module into the launcher firmware, and builds the firmware. The generated embedded ELF is intentionally ignored by Git.
+
+To flash and monitor, use the serial port for your board:
+
+```sh
+cd firmware/launcher
+idf.py -p PORT flash monitor
+```
+
+Replace `PORT` with the correct serial port (for example, a device under `/dev/cu.*` on macOS).
 
 ## First validation checklist
 
-- [ ] Identify the exact CYD hardware/display variant.
-- [ ] Build the launcher firmware for `esp32`.
-- [ ] Flash and confirm the startup log over serial.
-- [ ] Build and run the official ESP-ELFLoader example.
-- [ ] Verify repeated load/unload and memory recovery.
-- [ ] Add display and touch services only after the runtime test passes.
+- [ ] Confirm the exact CYD hardware variant.
+- [ ] Build the Hello World ELF module.
+- [ ] Build and flash the launcher firmware.
+- [ ] Confirm the module prints its message and returns to the launcher core.
+- [ ] Verify repeated load/unload cycles and memory recovery.
+- [ ] Load a module from a filesystem instead of embedding it.
+- [ ] Add display and touch services only after runtime behavior is understood.
