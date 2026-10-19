@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the launcher and example apps, and assemble a ready-to-use dist/ folder:
 #   dist/cyd-launcher-full.bin   flash once at offset 0x0
+#   dist/cyd-launcher.bin/.json  launcher image and metadata for Wi-Fi self-update
 #   dist/sd/apps/<id>/           copy to the SD card root
 set -euo pipefail
 
@@ -18,6 +19,25 @@ mkdir -p "$DIST/sd/apps"
 
 echo "==> Building the launcher"
 (cd "$LAUNCHER_DIR" && idf.py build && idf.py merge-bin -o "$DIST/cyd-launcher-full.bin")
+
+# ESP-IDF only warns when an app is larger than some app partitions; the launcher must fit factory.
+python3 "$IDF_PATH/components/partition_table/check_sizes.py" partition --type app --subtype factory \
+    "$LAUNCHER_DIR/build/partition_table/partition-table.bin" "$LAUNCHER_DIR/build/cyd_launcher.bin"
+
+# Launcher app image and metadata used for over-the-air self-updates.
+cp "$LAUNCHER_DIR/build/cyd_launcher.bin" "$DIST/cyd-launcher.bin"
+python3 - "$LAUNCHER_DIR/build/project_description.json" "$DIST/cyd-launcher.bin" "$DIST/cyd-launcher.json" <<'PY'
+import hashlib, json, os, sys
+desc, binary, dst = sys.argv[1:]
+data = open(binary, "rb").read()
+meta = {
+    "version": json.load(open(desc))["project_version"],
+    "sha256": hashlib.sha256(data).hexdigest(),
+    "size": len(data),
+}
+json.dump(meta, open(dst, "w"), indent=2)
+open(dst, "a").write("\n")
+PY
 
 # Package one app: build it, copy app.bin, and write manifest.json with its SHA-256.
 package_app() {

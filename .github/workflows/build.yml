@@ -29,6 +29,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          # Full history and tags so the firmware version is the release tag (e.g. v0.2.0).
+          fetch-depth: 0
 
       - name: Trust the workspace for git
         # ESP-IDF calls `git describe` for the project version; inside a
@@ -69,6 +72,8 @@ jobs:
         with:
           files: |
             dist/cyd-launcher-full.bin
+            dist/cyd-launcher.bin
+            dist/cyd-launcher.json
             dist/cyd-sd-card.zip
             dist/SHA256SUMS
           generate_release_notes: true

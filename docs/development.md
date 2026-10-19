@@ -4,6 +4,8 @@
 
 The initial target is the common 2.8-inch CYD (ESP32-2432S028R): original ESP32, 4 MB flash, ILI9341 display, XPT2046 touch, microSD. Pins and panel settings are in `components/cyd_board/include/cyd_board.h`; other variants need changes there.
 
+If the image is mirrored or the colors look inverted (dark backgrounds shown as white), change `CYD_LCD_MIRROR_X`, `CYD_LCD_MIRROR_Y`, or `CYD_LCD_INVERT_COLORS`. If touches land in the wrong place, adjust the `CYD_TOUCH_*` constants.
+
 ## Toolchain
 
 Install ESP-IDF v5.4 using Espressif's official instructions and activate its environment in your shell.
@@ -38,18 +40,23 @@ You can flash an app straight into the slot and select it as the boot partition:
 ```sh
 cd apps/examples/hello-app
 idf.py build
-esptool.py --chip esp32 -p PORT write_flash 0x100000 build/cyd_hello_app.bin
+esptool.py --chip esp32 -p PORT write_flash 0x160000 build/cyd_hello_app.bin
 ```
 
 Then use `otatool.py switch_ota_partition --slot 0` from ESP-IDF, or open the app once from the launcher.
 
 ## Hardware validation checklist
 
-- [ ] Launcher shows the app list; colors and orientation are correct.
-- [ ] Touch selects the right row; adjust `CYD_TOUCH_*` constants if not.
-- [ ] BOOT short press moves, long press opens.
-- [ ] Installing Hello from SD works; time to flash is acceptable.
+- [x] Launcher boots, mounts the SD card, and lists apps from their manifests.
+- [x] Image is not mirrored and colors are correct.
+- [ ] Footer buttons (power-on setting, launcher update) and status line do not overlap.
+- [x] Touch selects the right row.
+- [x] BOOT short press moves, long press opens.
+- [x] Installing Hello from SD works.
 - [ ] Opening the same app again skips flashing.
-- [ ] EXIT and long BOOT in Hello return to the launcher.
+- [x] EXIT and long BOOT in Hello return to the launcher.
 - [ ] RST returns to the launcher; with "power-on starts last app" it returns to the app.
 - [ ] A corrupted `app.bin` or wrong `sha256` is rejected and the previous app still boots.
+- [ ] `/wifi.json` is imported and CHECK UPDATE connects to Wi-Fi.
+- [ ] A newer release is offered and installs; the device returns to the launcher with the new version.
+- [ ] Power loss while "UPDATING LAUNCHER" is shown recovers on the next boot.

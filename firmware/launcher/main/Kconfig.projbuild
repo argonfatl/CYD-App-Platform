@@ -1,0 +1,10 @@
+menu "CYD App Platform launcher"
+
+    config CYD_UPDATE_REPO
+        string "GitHub repository for launcher updates"
+        default "argonfatl/CYD-App-Platform"
+        help
+            owner/name of the repository whose latest release provides
+            cyd-launcher.json and cyd-launcher.bin.
+
+endmenu

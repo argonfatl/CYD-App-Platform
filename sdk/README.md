@@ -24,7 +24,7 @@ void onExitPressed() {
 }
 ```
 
-Build for ESP32 Dev Module with 4 MB flash. The partition scheme chosen in the IDE does not matter at run time because the device keeps the platform's partition table, but the app must fit in 3 MB and must not need a SPIFFS/LittleFS partition.
+Build for ESP32 Dev Module with 4 MB flash. The partition scheme chosen in the IDE does not matter at run time because the device keeps the platform's partition table, but the app must fit in the 2.6 MB slot and must not need a SPIFFS/LittleFS partition.
 
 ## Rules for apps
 

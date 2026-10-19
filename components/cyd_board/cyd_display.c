@@ -82,9 +82,9 @@ esp_err_t cyd_display_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_ili9341(io, &panel_cfg, &s_panel), TAG, "Create panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "Reset panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "Init panel");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel, true), TAG, "Invert colors");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel, CYD_LCD_INVERT_COLORS), TAG, "Invert colors");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_panel, true), TAG, "Landscape");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, true, false), TAG, "Mirror");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, CYD_LCD_MIRROR_X, CYD_LCD_MIRROR_Y), TAG, "Mirror");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "Display on");
     ESP_RETURN_ON_ERROR(gpio_set_level(CYD_LCD_PIN_BL, 1), TAG, "Backlight on");
 
