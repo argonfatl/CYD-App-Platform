@@ -3,42 +3,74 @@ name: Build CYD App Platform prototype
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to the same branch cancels the older, still-running build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-elf-prototype:
-    name: Build Clock ELF app and launcher firmware
-    runs-on: ubuntu-latest
+  build:
+    name: Build ELF apps and launcher firmware
+    runs-on: ubuntu-24.04
+    # Pin an exact ESP-IDF release so builds are reproducible.
     container:
-      image: espressif/idf:release-v5.4
+      image: espressif/idf:v5.4.2
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Show toolchain versions
-        run: |
-          bash -c 'source "$IDF_PATH/export.sh" && idf.py --version && python --version'
+      - name: Trust the workspace for git
+        # ESP-IDF calls `git describe` for the project version; inside a
+        # container the checkout is owned by another user.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Build Hello World, Clock ELF, and launcher firmware
         run: |
-          bash -c 'source "$IDF_PATH/export.sh" && bash tools/build-elf-prototype.sh'
+          source "$IDF_PATH/export.sh"
+          idf.py --version
+          ./tools/build-elf-prototype.sh
+
+      - name: Collect release files
+        run: |
+          mkdir -p dist
+          cp firmware/launcher/build/cyd-app-platform-full.bin dist/
+          cp apps/examples/hello-world/build/cyd_hello_world.app.elf dist/
+          cp apps/examples/clock/build/cyd_clock.app.elf dist/
+          (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cyd-app-platform-elf-prototype
-          path: |
-            firmware/launcher/build/cyd-app-platform-full.bin
-            apps/examples/hello-world/build/**/*.elf
-            apps/examples/clock/build/**/*.elf
-            firmware/launcher/build/**/*.bin
-            firmware/launcher/build/**/*.elf
-            firmware/launcher/build/flasher_args.json
-            firmware/launcher/build/flash_project_args
+          path: dist/
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: cyd-app-platform-elf-prototype
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
