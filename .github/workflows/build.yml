@@ -33,6 +33,7 @@ jobs:
         with:
           name: cyd-app-platform-elf-prototype
           path: |
+            firmware/launcher/build/cyd-app-platform-full.bin
             apps/examples/hello-world/build/**/*.elf
             firmware/launcher/build/**/*.bin
             firmware/launcher/build/**/*.elf
