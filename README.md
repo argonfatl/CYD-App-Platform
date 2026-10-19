@@ -100,4 +100,4 @@ The manifest format and platform API are still being designed. Please open an is
 
 ## License
 
-License not selected yet.
+[MIT](LICENSE). Third-party apps installed through the platform keep their own licenses.
