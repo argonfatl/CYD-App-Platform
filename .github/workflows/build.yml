@@ -1,0 +1,42 @@
+name: Build CYD App Platform prototype
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-elf-prototype:
+    name: Build ELF app and launcher firmware
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.4
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        run: |
+          idf.py --version
+          python --version
+
+      - name: Build Hello World ELF and launcher firmware
+        run: ./tools/build-elf-prototype.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyd-app-platform-elf-prototype
+          path: |
+            apps/examples/hello-world/build/**/*.elf
+            firmware/launcher/build/**/*.bin
+            firmware/launcher/build/**/*.elf
+            firmware/launcher/build/flasher_args.json
+            firmware/launcher/build/flash_project_args
+          if-no-files-found: error
+          retention-days: 14

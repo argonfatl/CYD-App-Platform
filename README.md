@@ -6,7 +6,9 @@ CYD App Platform is an open-source application platform for the ESP32 Cheap Yell
 
 ## Project status
 
-🚧 **Early prototype.** The repository now contains an ESP-IDF launcher skeleton and a Hello World ELF module. The first goal is to validate loading and unloading an app module before building the display UI, app catalog, or web manager.
+🚧 **Early prototype.** The repository contains an ESP-IDF launcher skeleton and a Hello World ELF module. The first goal is to validate loading and unloading an app module before building the display UI, app catalog, or web manager.
+
+The GitHub Actions workflow builds the ELF module and launcher firmware on pushes, pull requests, and manual runs. Successful builds publish downloadable artifacts.
 
 ## Goals
 
@@ -24,11 +26,13 @@ CYD App Platform is an open-source application platform for the ESP32 Cheap Yell
 
 The prototype uses ESP-IDF and Espressif's ELF Loader as a candidate runtime. The Hello World module is built separately as an ELF app, then embedded in the launcher firmware for the first deterministic load/unload test.
 
-From a shell with ESP-IDF activated, run:
+To build locally from a shell with ESP-IDF activated:
 
 ```sh
 ./tools/build-elf-prototype.sh
 ```
+
+Alternatively, open the **Actions** tab in GitHub and run or inspect **Build CYD App Platform prototype**. Successful runs upload a `cyd-app-platform-elf-prototype` artifact.
 
 This is a runtime experiment, not yet a finished launcher. It does not yet include the display UI, filesystem-based app installation, SDK, or GitHub manager.
 
@@ -51,7 +55,7 @@ An ordinary firmware `.bin` stored in a folder is not directly executable by ESP
 1. Build and flash the ESP-IDF launcher skeleton.
 2. Load and unload the Hello World ELF module.
 3. Test repeated load/unload cycles and memory recovery.
-4. Load modules from a filesystem rather than embedding them.
+4. Load modules from a filesystem instead of embedding them.
 5. Define the app lifecycle and SDK contract.
 6. Add a local app registry and per-app data directories.
 7. Add GitHub repository registration and package updates.
