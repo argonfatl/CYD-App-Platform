@@ -34,6 +34,8 @@ If touches land in the wrong place, open the **Touch Setup** app from the launch
 2. Select **CHECK UPDATE** at the bottom of the launcher. It connects to Wi-Fi and checks the latest release of this repository.
 3. If a newer version is found, the button changes to **INSTALL vX.Y.Z**. Open it again to download, verify, and install the update. The device restarts twice.
 
+The launcher version is shown in the top-right corner: **cyan** for a release (`v0.2.0`), **amber** for a development build (`v0.2.0+5` means five commits after v0.2.0).
+
 The installed app is removed during an update and is reinstalled from the SD card the next time you open it. See [ADR 0003](docs/adr/0003-launcher-self-update.md) for details.
 
 ## Quick start

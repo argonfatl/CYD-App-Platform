@@ -67,7 +67,36 @@ typedef struct {
 } launcher_t;
 
 static launcher_t s_ui;
+static char s_version[24];        /* short launcher version shown in the header */
+static bool s_version_is_release; /* built exactly from a vX.Y.Z tag */
 static uint8_t s_chunk[COPY_CHUNK];
+
+/* ---------- Version label ---------- */
+
+/*
+ * Turn the git-describe version into a short label:
+ *   "v0.2.0"                 -> "v0.2.0"    (release)
+ *   "v0.2.0-5-g1a2b3c4-dirty" -> "v0.2.0+5"  (5 commits after the release)
+ *   "v0.2.0-dirty"           -> "v0.2.0 DEV"
+ *   "1a2b3c4"                -> "DEV 1a2b3c4"
+ */
+static void make_version_label(const char *full, char *out, size_t len, bool *is_release)
+{
+    int major, minor, patch, ahead = 0;
+    char rest;
+    const char *p = (*full == 'v' || *full == 'V') ? full + 1 : full;
+    int n = sscanf(p, "%d.%d.%d%c", &major, &minor, &patch, &rest);
+    *is_release = (n == 3);
+    if (n == 3) {
+        snprintf(out, len, "v%d.%d.%d", major, minor, patch);
+    } else if (n == 4 && rest == '-' && sscanf(p, "%*d.%*d.%*d-%d-g", &ahead) == 1) {
+        snprintf(out, len, "v%d.%d.%d+%d", major, minor, patch, ahead);
+    } else if (n == 4) {
+        snprintf(out, len, "v%d.%d.%d DEV", major, minor, patch); /* e.g. uncommitted changes */
+    } else {
+        snprintf(out, len, "DEV %.7s", full);
+    }
+}
 
 /* ---------- Manifest scanning ---------- */
 
@@ -200,8 +229,9 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, 32, CYD_PANEL);
     cyd_fill_rect(c, 0, 32, CYD_LCD_H_RES, 2, CYD_CYAN);
     cyd_draw_text(c, "CYD APPS", 10, 9, 2, CYD_WHITE);
-    const esp_app_desc_t *desc = esp_app_get_description();
-    cyd_draw_text(c, desc->version, CYD_LCD_H_RES - 10 - cyd_text_width(desc->version, 1), 13, 1, CYD_GREY);
+    /* Launcher version: cyan for a release build, amber for a development build. */
+    cyd_draw_text(c, s_version, CYD_LCD_H_RES - 10 - cyd_text_width(s_version, 2), 9, 2,
+                  s_version_is_release ? CYD_CYAN : CYD_AMBER);
 
     if (s_ui.progress >= 0) {
         cyd_draw_text(c, s_ui.progress_label, 20, 90, 2, CYD_WHITE);
@@ -569,6 +599,10 @@ void app_main(void)
 
     /* If this is a freshly downloaded launcher running from ota_0, finish installing it. */
     self_update_finish_if_staged(on_progress);
+
+    make_version_label(esp_app_get_description()->version, s_version, sizeof(s_version),
+                       &s_version_is_release);
+    ESP_LOGI(TAG, "Launcher %s (%s)", s_version, esp_app_get_description()->version);
 
     s_ui.progress = -1;
     s_ui.keep_app = cyd_platform_get_keep_app_on_power_on();
