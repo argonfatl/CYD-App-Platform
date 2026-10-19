@@ -2,39 +2,54 @@
 
 ## Target
 
-The initial target is the common 2.8-inch CYD with the original ESP32 and a 320×240 landscape UI. CYD boards have hardware variants; confirm the exact display driver and pin mapping before enabling display code.
+The initial target is the common 2.8-inch CYD (ESP32-2432S028R): original ESP32, 4 MB flash, ILI9341 display, XPT2046 touch, microSD. Pins and panel settings are in `components/cyd_board/include/cyd_board.h`; other variants need changes there.
 
 ## Toolchain
 
-The prototype uses ESP-IDF because the leading app-loader candidate is an ESP-IDF component. Arduino libraries may be integrated later if needed, but app modules must not assume the full Arduino environment is available inside a dynamically loaded ELF.
+Install ESP-IDF v5.4 using Espressif's official instructions and activate its environment in your shell.
 
-Install ESP-IDF using Espressif's official setup instructions and activate its environment in your shell.
-
-## Build the runtime prototype
+## Build
 
 From the repository root:
 
 ```sh
-./tools/build-elf-prototype.sh
+./tools/build.sh
 ```
 
-The script builds the Hello World ELF app, embeds the generated module into the launcher firmware, and builds the firmware. The generated embedded ELF is intentionally ignored by Git.
+This builds the launcher and every app under `apps/examples/`, then writes:
 
-To flash and monitor, use the serial port for your board:
+- `dist/cyd-launcher-full.bin` — bootloader, partition table, and launcher; flash at `0x0`;
+- `dist/sd/apps/<id>/` — `app.bin` and `manifest.json` with the computed SHA-256; copy to the SD card;
+- `dist/SHA256SUMS`.
+
+## Flash and monitor the launcher
 
 ```sh
 cd firmware/launcher
 idf.py -p PORT flash monitor
 ```
 
-Replace `PORT` with the correct serial port (for example, a device under `/dev/cu.*` on macOS).
+Replace `PORT` with your serial port (for example a `/dev/cu.*` device on macOS).
 
-## First validation checklist
+## Test an app without the SD card
 
-- [ ] Confirm the exact CYD hardware variant.
-- [ ] Build the Hello World ELF module.
-- [ ] Build and flash the launcher firmware.
-- [ ] Confirm the module prints its message and returns to the launcher core.
-- [ ] Verify repeated load/unload cycles and memory recovery.
-- [ ] Load a module from a filesystem instead of embedding it.
-- [ ] Add display and touch services only after runtime behavior is understood.
+You can flash an app straight into the slot and select it as the boot partition:
+
+```sh
+cd apps/examples/hello-app
+idf.py build
+esptool.py --chip esp32 -p PORT write_flash 0x100000 build/cyd_hello_app.bin
+```
+
+Then use `otatool.py switch_ota_partition --slot 0` from ESP-IDF, or open the app once from the launcher.
+
+## Hardware validation checklist
+
+- [ ] Launcher shows the app list; colors and orientation are correct.
+- [ ] Touch selects the right row; adjust `CYD_TOUCH_*` constants if not.
+- [ ] BOOT short press moves, long press opens.
+- [ ] Installing Hello from SD works; time to flash is acceptable.
+- [ ] Opening the same app again skips flashing.
+- [ ] EXIT and long BOOT in Hello return to the launcher.
+- [ ] RST returns to the launcher; with "power-on starts last app" it returns to the app.
+- [ ] A corrupted `app.bin` or wrong `sha256` is rejected and the previous app still boots.

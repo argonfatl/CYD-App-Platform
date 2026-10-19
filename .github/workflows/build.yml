@@ -1,4 +1,4 @@
-name: Build CYD App Platform prototype
+name: Build CYD App Platform
 
 on:
   push:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build ELF apps and launcher firmware
+    name: Build launcher and example apps
     runs-on: ubuntu-24.04
     # Pin an exact ESP-IDF release so builds are reproducible.
     container:
@@ -35,24 +35,19 @@ jobs:
         # container the checkout is owned by another user.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Build Hello World, Clock ELF, and launcher firmware
+      - name: Build launcher and apps
         run: |
           source "$IDF_PATH/export.sh"
           idf.py --version
-          ./tools/build-elf-prototype.sh
+          ./tools/build.sh
 
-      - name: Collect release files
-        run: |
-          mkdir -p dist
-          cp firmware/launcher/build/cyd-app-platform-full.bin dist/
-          cp apps/examples/hello-world/build/cyd_hello_world.app.elf dist/
-          cp apps/examples/clock/build/cyd_clock.app.elf dist/
-          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Package the SD card folder
+        run: cd dist/sd && python3 -m zipfile -c ../cyd-sd-card.zip apps
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cyd-app-platform-elf-prototype
+          name: cyd-app-platform
           path: dist/
           if-no-files-found: error
           retention-days: 14
@@ -67,10 +62,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v5
         with:
-          name: cyd-app-platform-elf-prototype
+          name: cyd-app-platform
           path: dist
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/cyd-launcher-full.bin
+            dist/cyd-sd-card.zip
+            dist/SHA256SUMS
           generate_release_notes: true

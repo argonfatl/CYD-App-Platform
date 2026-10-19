@@ -1,6 +1,6 @@
 # ADR 0001: Evaluate an ELF-based app runtime
 
-- **Status:** Proposed; must be validated on hardware
+- **Status:** Superseded by [ADR 0002](0002-firmware-slot-runtime.md)
 - **Date:** 2026-10-19
 
 ## Context

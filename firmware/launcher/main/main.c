@@ -1,253 +1,517 @@
+/*
+ * CYD App Platform launcher.
+ *
+ * Lists apps from /sdcard/apps/<id>/manifest.json, installs the chosen app
+ * into the ota_0 slot (verifying SHA-256), and boots it. See ADR 0002.
+ */
+#include <dirent.h>
 #include <inttypes.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_attr.h"
-#include "esp_check.h"
-#include "esp_elf.h"
-#include "esp_err.h"
-#include "esp_idf_version.h"
-#include "esp_lcd_ili9341.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
+#include "cJSON.h"
+#include "cyd_board.h"
+#include "cyd_platform.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/sha256.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 
-#define LCD_H_RES 320
-#define LCD_V_RES 240
-#define LCD_PIN_MOSI 13
-#define LCD_PIN_MISO 12
-#define LCD_PIN_SCLK 14
-#define LCD_PIN_CS   15
-#define LCD_PIN_DC   2
-#define LCD_PIN_BL   21
+#define APPS_DIR          CYD_SD_MOUNT_POINT "/apps"
+#define MAX_APPS          16
+#define ROW_HEIGHT        34
+#define LIST_TOP          40
+#define VISIBLE_ROWS      5
+#define FOOTER_TOP        (LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT + 6)
+#define LONG_PRESS_US     700000
+#define COPY_CHUNK        4096
+#define NVS_NAMESPACE     "cyd_launcher"
 
-static const char *TAG = "cyd-platform";
+static const char *TAG = "launcher";
 
-extern const uint8_t clock_elf_start[] asm("_binary_clock_app_elf_start");
+typedef struct {
+    char id[32];
+    char name[32];
+    char version[16];
+    char binary_path[160];
+    char sha256[65]; /* expected hash from the manifest, empty if absent */
+} app_entry_t;
 
-static esp_lcd_panel_handle_t s_panel;
-static DMA_ATTR uint16_t s_framebuffer[LCD_H_RES * LCD_V_RES];
-static int64_t s_clock_start_us;
-static volatile bool s_clock_app_running;
-static volatile bool s_clock_app_finished;
+typedef struct {
+    app_entry_t apps[MAX_APPS];
+    int count;
+    int selected;         /* 0..count-1 apps, count = settings row */
+    int scroll;
+    bool sd_ok;
+    bool keep_app;
+    char installed_id[32];
+    char status[48];
+    uint16_t status_color;
+    int progress;         /* -1 = hidden, 0..100 */
+    char progress_label[48];
+} launcher_t;
 
-static const uint8_t s_font[][5] = {
-    /* A-Z */
-    {0x7E,0x11,0x11,0x11,0x7E}, {0x7F,0x49,0x49,0x49,0x36},
-    {0x3E,0x41,0x41,0x41,0x22}, {0x7F,0x41,0x41,0x22,0x1C},
-    {0x7F,0x49,0x49,0x49,0x41}, {0x7F,0x09,0x09,0x09,0x01},
-    {0x3E,0x41,0x49,0x49,0x7A}, {0x7F,0x08,0x08,0x08,0x7F},
-    {0x00,0x41,0x7F,0x41,0x00}, {0x20,0x40,0x41,0x3F,0x01},
-    {0x7F,0x08,0x14,0x22,0x41}, {0x7F,0x40,0x40,0x40,0x40},
-    {0x7F,0x02,0x0C,0x02,0x7F}, {0x7F,0x04,0x08,0x10,0x7F},
-    {0x3E,0x41,0x41,0x41,0x3E}, {0x7F,0x09,0x09,0x09,0x06},
-    {0x3E,0x41,0x51,0x21,0x5E}, {0x7F,0x09,0x19,0x29,0x46},
-    {0x46,0x49,0x49,0x49,0x31}, {0x01,0x01,0x7F,0x01,0x01},
-    {0x3F,0x40,0x40,0x40,0x3F}, {0x1F,0x20,0x40,0x20,0x1F},
-    {0x3F,0x40,0x38,0x40,0x3F}, {0x63,0x14,0x08,0x14,0x63},
-    {0x07,0x08,0x70,0x08,0x07}, {0x61,0x51,0x49,0x45,0x43},
-    /* 0-9 */
-    {0x3E,0x51,0x49,0x45,0x3E}, {0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46}, {0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10}, {0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30}, {0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1E},
-    /* colon and hyphen */
-    {0x00,0x36,0x36,0x00,0x00}, {0x08,0x08,0x08,0x08,0x08},
-    /* slash */
-    {0x20,0x10,0x08,0x04,0x02}
-};
+static launcher_t s_ui;
+static uint8_t s_chunk[COPY_CHUNK];
 
-enum { FONT_COLON = 36, FONT_HYPHEN = 37, FONT_SLASH = 38 };
+/* ---------- Manifest scanning ---------- */
 
-static const uint8_t *glyph_for(char c)
+static void copy_json_string(const cJSON *obj, const char *key, char *dst, size_t len)
 {
-    if (c >= 'A' && c <= 'Z') return s_font[c - 'A'];
-    if (c >= 'a' && c <= 'z') return s_font[c - 'a'];
-    if (c >= '0' && c <= '9') return s_font[26 + c - '0'];
-    if (c == ':') return s_font[FONT_COLON];
-    if (c == '-') return s_font[FONT_HYPHEN];
-    if (c == '/') return s_font[FONT_SLASH];
-    return NULL;
-}
-
-static void fill_rect(int x, int y, int w, int h, uint16_t color)
-{
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > LCD_H_RES) w = LCD_H_RES - x;
-    if (y + h > LCD_V_RES) h = LCD_V_RES - y;
-    if (w <= 0 || h <= 0) return;
-
-    for (int row = y; row < y + h; ++row) {
-        uint16_t *dst = &s_framebuffer[row * LCD_H_RES + x];
-        for (int col = 0; col < w; ++col) dst[col] = color;
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsString(item) && item->valuestring) {
+        snprintf(dst, len, "%s", item->valuestring);
     }
 }
 
-static void draw_text(const char *text, int x, int y, int scale, uint16_t color)
+static bool load_manifest(const char *dir_name, app_entry_t *app)
 {
-    for (const char *p = text; *p; ++p, x += 6 * scale) {
-        const uint8_t *glyph = glyph_for(*p);
-        if (!glyph) continue;
-        for (int col = 0; col < 5; ++col) {
-            for (int row = 0; row < 7; ++row) {
-                if (glyph[col] & (1U << row)) {
-                    fill_rect(x + col * scale, y + row * scale, scale, scale, color);
-                }
+    char path[160];
+    snprintf(path, sizeof(path), APPS_DIR "/%s/manifest.json", dir_name);
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return false;
+    }
+    char text[1024];
+    size_t len = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[len] = '\0';
+
+    cJSON *root = cJSON_Parse(text);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "%s: invalid JSON", path);
+        return false;
+    }
+
+    memset(app, 0, sizeof(*app));
+    snprintf(app->id, sizeof(app->id), "%s", dir_name);
+    snprintf(app->name, sizeof(app->name), "%s", dir_name);
+    copy_json_string(root, "id", app->id, sizeof(app->id));
+    copy_json_string(root, "name", app->name, sizeof(app->name));
+    copy_json_string(root, "version", app->version, sizeof(app->version));
+    copy_json_string(root, "sha256", app->sha256, sizeof(app->sha256));
+
+    char binary[48] = "app.bin";
+    copy_json_string(root, "binary", binary, sizeof(binary));
+    cJSON_Delete(root);
+
+    if (strchr(binary, '/') != NULL || strstr(binary, "..") != NULL) {
+        ESP_LOGW(TAG, "%s: binary must be a plain file name", path);
+        return false;
+    }
+    snprintf(app->binary_path, sizeof(app->binary_path), APPS_DIR "/%s/%s", dir_name, binary);
+
+    struct stat st;
+    if (stat(app->binary_path, &st) != 0 || st.st_size == 0) {
+        ESP_LOGW(TAG, "%s: %s is missing", dir_name, binary);
+        return false;
+    }
+    for (char *p = app->sha256; *p; ++p) {
+        if (*p >= 'A' && *p <= 'F') *p = (char)(*p - 'A' + 'a');
+    }
+    return true;
+}
+
+static void scan_apps(void)
+{
+    s_ui.count = 0;
+    DIR *dir = opendir(APPS_DIR);
+    if (dir == NULL) {
+        return;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && s_ui.count < MAX_APPS) {
+        if (entry->d_name[0] == '.') continue;
+        if (load_manifest(entry->d_name, &s_ui.apps[s_ui.count])) {
+            ESP_LOGI(TAG, "Found app %s (%s)", s_ui.apps[s_ui.count].name, s_ui.apps[s_ui.count].id);
+            s_ui.count++;
+        }
+    }
+    closedir(dir);
+}
+
+/* ---------- Persistent launcher state ---------- */
+
+static void nvs_get_str_default(nvs_handle_t h, const char *key, char *dst, size_t len)
+{
+    size_t size = len;
+    if (nvs_get_str(h, key, dst, &size) != ESP_OK) {
+        dst[0] = '\0';
+    }
+}
+
+static void load_installed(char *id, size_t id_len, char *sha, size_t sha_len)
+{
+    nvs_handle_t h;
+    id[0] = sha[0] = '\0';
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_str_default(h, "slot_id", id, id_len);
+        nvs_get_str_default(h, "slot_sha", sha, sha_len);
+        nvs_close(h);
+    }
+}
+
+static void save_installed(const char *id, const char *sha)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "slot_id", id);
+        nvs_set_str(h, "slot_sha", sha);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+/* ---------- Drawing ---------- */
+
+static void draw_screen(cyd_canvas_t *c, void *ctx)
+{
+    (void)ctx;
+    cyd_fill(c, CYD_DARK);
+
+    cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, 32, CYD_PANEL);
+    cyd_fill_rect(c, 0, 32, CYD_LCD_H_RES, 2, CYD_CYAN);
+    cyd_draw_text(c, "CYD APPS", 10, 9, 2, CYD_WHITE);
+    const esp_app_desc_t *desc = esp_app_get_description();
+    cyd_draw_text(c, desc->version, CYD_LCD_H_RES - 10 - cyd_text_width(desc->version, 1), 13, 1, CYD_GREY);
+
+    if (s_ui.progress >= 0) {
+        cyd_draw_text(c, s_ui.progress_label, 20, 90, 2, CYD_WHITE);
+        cyd_fill_rect(c, 20, 120, CYD_LCD_H_RES - 40, 16, CYD_PANEL);
+        cyd_fill_rect(c, 20, 120, (CYD_LCD_H_RES - 40) * s_ui.progress / 100, 16, CYD_CYAN);
+    } else if (!s_ui.sd_ok) {
+        cyd_draw_text(c, "NO SD CARD", 20, 80, 2, CYD_AMBER);
+        cyd_draw_text(c, "INSERT A FAT32 CARD WITH", 20, 115, 1, CYD_WHITE);
+        cyd_draw_text(c, "/APPS/<ID>/MANIFEST.JSON + APP.BIN", 20, 130, 1, CYD_WHITE);
+    } else if (s_ui.count == 0) {
+        cyd_draw_text(c, "NO APPS FOUND", 20, 80, 2, CYD_AMBER);
+        cyd_draw_text(c, "COPY APPS TO /APPS/<ID>/ ON THE CARD", 20, 115, 1, CYD_WHITE);
+    } else {
+        for (int row = 0; row < VISIBLE_ROWS; ++row) {
+            int i = s_ui.scroll + row;
+            if (i >= s_ui.count) break;
+            const app_entry_t *app = &s_ui.apps[i];
+            int y = LIST_TOP + row * ROW_HEIGHT;
+            bool sel = (i == s_ui.selected);
+            cyd_fill_rect(c, 6, y, CYD_LCD_H_RES - 12, ROW_HEIGHT - 4, sel ? CYD_CYAN : CYD_PANEL);
+            uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
+            cyd_draw_text(c, app->name, 16, y + 8, 2, fg);
+            if (app->version[0]) {
+                cyd_draw_text(c, app->version, CYD_LCD_H_RES - 16 - cyd_text_width(app->version, 1),
+                              y + 6, 1, sel ? CYD_BLACK : CYD_GREY);
+            }
+            if (strcmp(app->id, s_ui.installed_id) == 0) {
+                cyd_draw_text(c, "INSTALLED", CYD_LCD_H_RES - 16 - cyd_text_width("INSTALLED", 1),
+                              y + 18, 1, sel ? CYD_BLACK : CYD_GREEN);
             }
         }
     }
+
+    /* Settings row */
+    bool settings_sel = (s_ui.selected == s_ui.count);
+    cyd_fill_rect(c, 6, FOOTER_TOP, CYD_LCD_H_RES - 12, 20, settings_sel ? CYD_AMBER : CYD_PANEL);
+    cyd_draw_text(c, s_ui.keep_app ? "POWER-ON STARTS: LAST APP" : "POWER-ON STARTS: LAUNCHER",
+                  14, FOOTER_TOP + 6, 1, settings_sel ? CYD_BLACK : CYD_WHITE);
+
+    cyd_draw_text(c, s_ui.status, 10, CYD_LCD_V_RES - 12, 1, s_ui.status_color);
 }
 
-static esp_err_t display_init(void)
+static void redraw(void)
 {
-    gpio_config_t backlight_cfg = {
-        .pin_bit_mask = 1ULL << LCD_PIN_BL,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&backlight_cfg), TAG, "Configure LCD backlight");
-    ESP_RETURN_ON_ERROR(gpio_set_level(LCD_PIN_BL, 1), TAG, "Enable LCD backlight");
+    esp_err_t err = cyd_display_render(draw_screen, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Render failed: %s", esp_err_to_name(err));
+    }
+}
 
-    spi_bus_config_t bus_cfg = {
-        .sclk_io_num = LCD_PIN_SCLK,
-        .mosi_io_num = LCD_PIN_MOSI,
-        .miso_io_num = LCD_PIN_MISO,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = sizeof(s_framebuffer),
-    };
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO),
-                        TAG, "Initialize LCD SPI bus");
+static void set_status(const char *text, uint16_t color)
+{
+    snprintf(s_ui.status, sizeof(s_ui.status), "%s", text);
+    s_ui.status_color = color;
+}
 
-    esp_lcd_panel_io_spi_config_t io_cfg = {
-        .dc_gpio_num = LCD_PIN_DC,
-        .cs_gpio_num = LCD_PIN_CS,
-        .pclk_hz = 40 * 1000 * 1000,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
-        .spi_mode = 0,
-        .trans_queue_depth = 10,
-    };
-    esp_lcd_panel_io_handle_t io_handle = NULL;
-    ESP_RETURN_ON_ERROR(
-        esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_cfg, &io_handle),
-        TAG, "Create LCD panel IO");
+static void set_progress(const char *label, int percent)
+{
+    if (label) snprintf(s_ui.progress_label, sizeof(s_ui.progress_label), "%s", label);
+    s_ui.progress = percent;
+    redraw();
+}
 
-    esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = -1,
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
-        .color_space = ESP_LCD_COLOR_SPACE_BGR,
-#else
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
-#endif
-        .bits_per_pixel = 16,
-    };
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_ili9341(io_handle, &panel_cfg, &s_panel),
-                        TAG, "Create ILI9341 panel");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "Reset LCD panel");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "Initialize LCD panel");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel, true), TAG, "Set LCD color inversion");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_panel, true), TAG, "Set LCD landscape orientation");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, true, false), TAG, "Set LCD mirror");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "Turn on LCD");
-    ESP_LOGI(TAG, "ILI9341 display initialized (320x240 landscape)");
+/* ---------- Installing and starting apps ---------- */
+
+static void to_hex(const uint8_t *digest, char *out)
+{
+    for (int i = 0; i < 32; ++i) {
+        sprintf(out + i * 2, "%02x", digest[i]);
+    }
+}
+
+static esp_err_t hash_file(const char *path, long size, char out_hex[65])
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return ESP_ERR_NOT_FOUND;
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);
+    long done = 0;
+    int last = -1;
+    size_t n;
+    while ((n = fread(s_chunk, 1, sizeof(s_chunk), f)) > 0) {
+        mbedtls_sha256_update(&ctx, s_chunk, n);
+        done += (long)n;
+        int pct = (int)(done * 30 / size);
+        if (pct != last) { last = pct; set_progress(NULL, pct); }
+    }
+    fclose(f);
+
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&ctx, digest);
+    mbedtls_sha256_free(&ctx);
+    to_hex(digest, out_hex);
     return ESP_OK;
 }
 
-static void draw_clock_screen(void)
+static esp_err_t flash_file(const char *path, long size, const esp_partition_t *slot)
 {
-    const uint16_t bg = 0x0841;
-    const uint16_t panel = 0x10A2;
-    const uint16_t cyan = 0x07FF;
-    const uint16_t white = 0xFFFF;
-    const uint16_t green = 0x07E0;
-    const uint16_t amber = 0xFD20;
-    char clock_text[16];
-    char elapsed_text[32];
-    const uint64_t elapsed = (uint64_t)((esp_timer_get_time() - s_clock_start_us) / 1000000);
-    const unsigned int hours = (unsigned int)((elapsed / 3600) % 100);
-    const unsigned int minutes = (unsigned int)((elapsed / 60) % 60);
-    const unsigned int seconds = (unsigned int)(elapsed % 60);
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return ESP_ERR_NOT_FOUND;
 
-    snprintf(clock_text, sizeof(clock_text), "%02u:%02u:%02u", hours, minutes, seconds);
-    snprintf(elapsed_text, sizeof(elapsed_text), "%s", s_clock_app_running ? "APP RUNNING" :
-             (s_clock_app_finished ? "APP FINISHED" : "STARTING APP"));
+    esp_ota_handle_t ota;
+    esp_err_t err = esp_ota_begin(slot, (size_t)size, &ota);
+    if (err != ESP_OK) {
+        fclose(f);
+        return err;
+    }
 
-    for (size_t i = 0; i < LCD_H_RES * LCD_V_RES; ++i) s_framebuffer[i] = bg;
-    fill_rect(0, 0, LCD_H_RES, 5, cyan);
-    fill_rect(16, 16, LCD_H_RES - 32, LCD_V_RES - 32, panel);
-    fill_rect(16, 16, LCD_H_RES - 32, 2, cyan);
-    draw_text("CYD CLOCK", 106, 30, 2, white);
-    draw_text(elapsed_text, 127, 62, 1, s_clock_app_running ? green : amber);
-    draw_text(clock_text, 64, 94, 4, white);
-    draw_text("ELAPSED SINCE START", 103, 145, 1, cyan);
-    draw_text("WALL CLOCK NOT SET", 103, 178, 1, white);
-    draw_text("ELF MODULE / 30 SEC", 103, 198, 1, amber);
-    fill_rect(0, LCD_V_RES - 5, LCD_H_RES, 5, cyan);
+    long done = 0;
+    int last = -1;
+    size_t n;
+    while ((n = fread(s_chunk, 1, sizeof(s_chunk), f)) > 0) {
+        err = esp_ota_write(ota, s_chunk, n);
+        if (err != ESP_OK) break;
+        done += (long)n;
+        int pct = 30 + (int)(done * 70 / size);
+        if (pct != last) { last = pct; set_progress(NULL, pct); }
+    }
+    fclose(f);
 
-    esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_H_RES, LCD_V_RES, s_framebuffer);
-    if (err != ESP_OK) ESP_LOGE(TAG, "LCD frame update failed: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        esp_ota_abort(ota);
+        return err;
+    }
+    if (done != size) {
+        esp_ota_abort(ota);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return esp_ota_end(ota); /* validates the image header and checksum */
 }
 
-static void display_task(void *arg)
+static void fail(const char *message, esp_err_t err)
 {
-    (void)arg;
-    for (;;) {
-        draw_clock_screen();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGE(TAG, "%s: %s", message, esp_err_to_name(err));
+    char text[48];
+    snprintf(text, sizeof(text), "%s", message);
+    set_status(text, CYD_RED);
+    s_ui.progress = -1;
+    redraw();
+}
+
+static void launch_app(const app_entry_t *app)
+{
+    const esp_partition_t *slot = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    if (slot == NULL) {
+        fail("NO APP SLOT IN PARTITION TABLE", ESP_ERR_NOT_FOUND);
+        return;
     }
+
+    struct stat st;
+    if (stat(app->binary_path, &st) != 0) {
+        fail("APP FILE MISSING", ESP_ERR_NOT_FOUND);
+        return;
+    }
+    if ((size_t)st.st_size > slot->size) {
+        fail("APP TOO BIG FOR 3 MB SLOT", ESP_ERR_INVALID_SIZE);
+        return;
+    }
+
+    char label[48];
+    snprintf(label, sizeof(label), "CHECKING %s", app->name);
+    set_progress(label, 0);
+
+    char sha[65];
+    esp_err_t err = hash_file(app->binary_path, st.st_size, sha);
+    if (err != ESP_OK) {
+        fail("CANNOT READ APP FILE", err);
+        return;
+    }
+    if (app->sha256[0] && strcmp(app->sha256, sha) != 0) {
+        fail("SHA-256 MISMATCH - NOT INSTALLED", ESP_ERR_INVALID_CRC);
+        return;
+    }
+
+    char slot_id[32], slot_sha[65];
+    load_installed(slot_id, sizeof(slot_id), slot_sha, sizeof(slot_sha));
+    esp_app_desc_t slot_desc;
+    bool already = strcmp(slot_sha, sha) == 0 &&
+                   esp_ota_get_partition_description(slot, &slot_desc) == ESP_OK;
+
+    if (!already) {
+        snprintf(label, sizeof(label), "INSTALLING %s", app->name);
+        set_progress(label, 30);
+        save_installed("", ""); /* the slot is about to change */
+        err = flash_file(app->binary_path, st.st_size, slot);
+        if (err != ESP_OK) {
+            fail("INSTALL FAILED", err);
+            return;
+        }
+        save_installed(app->id, sha);
+    } else {
+        ESP_LOGI(TAG, "%s is already in the slot; skipping flash", app->id);
+    }
+
+    err = esp_ota_set_boot_partition(slot);
+    if (err != ESP_OK) {
+        fail("CANNOT SELECT APP SLOT", err);
+        return;
+    }
+
+    snprintf(label, sizeof(label), "STARTING %s", app->name);
+    set_progress(label, 100);
+    ESP_LOGI(TAG, "Booting %s", app->id);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+
+/* ---------- Input ---------- */
+
+static void select_item(int index)
+{
+    int total = s_ui.count + 1;
+    s_ui.selected = (index % total + total) % total;
+    if (s_ui.selected < s_ui.count) {
+        if (s_ui.selected < s_ui.scroll) s_ui.scroll = s_ui.selected;
+        if (s_ui.selected >= s_ui.scroll + VISIBLE_ROWS) s_ui.scroll = s_ui.selected - VISIBLE_ROWS + 1;
+    }
+}
+
+static void activate_selected(void)
+{
+    if (s_ui.selected == s_ui.count) {
+        bool keep = !s_ui.keep_app;
+        if (cyd_platform_set_keep_app_on_power_on(keep) == ESP_OK) {
+            s_ui.keep_app = keep;
+            set_status("SETTING SAVED", CYD_GREEN);
+        } else {
+            set_status("COULD NOT SAVE SETTING", CYD_RED);
+        }
+        redraw();
+        return;
+    }
+    if (s_ui.selected >= 0 && s_ui.selected < s_ui.count) {
+        launch_app(&s_ui.apps[s_ui.selected]);
+    }
+}
+
+/* Returns the item index under a touch point, or -1. */
+static int item_at(int x, int y)
+{
+    (void)x;
+    if (y >= FOOTER_TOP && y < FOOTER_TOP + 20) return s_ui.count;
+    if (y >= LIST_TOP && y < LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT) {
+        int i = s_ui.scroll + (y - LIST_TOP) / ROW_HEIGHT;
+        if (i < s_ui.count) return i;
+    }
+    return -1;
+}
+
+static void refresh_apps(void)
+{
+    s_ui.sd_ok = cyd_sd_mount() == ESP_OK;
+    if (s_ui.sd_ok) scan_apps();
+    else s_ui.count = 0;
+    select_item(0);
+
+    char sha[65];
+    load_installed(s_ui.installed_id, sizeof(s_ui.installed_id), sha, sizeof(sha));
+    set_status(s_ui.count > 0 ? "TAP OR BOOT: NEXT / HOLD BOOT: OPEN" : "", CYD_GREY);
 }
 
 void app_main(void)
 {
-    esp_elf_t elf;
-    int ret;
-
-    ESP_LOGI(TAG, "CYD App Platform booted");
-    ESP_ERROR_CHECK(display_init());
-    s_clock_start_us = esp_timer_get_time();
-    xTaskCreate(display_task, "clock_display", 4096, NULL, 4, NULL);
-    ESP_LOGI(TAG, "Clock UI started on the CYD display");
-    ESP_LOGI(TAG, "Starting embedded Clock ELF prototype");
-
-    ret = esp_elf_init(&elf);
-    if (ret < 0) {
-        ESP_LOGE(TAG, "esp_elf_init failed: %d", ret);
-        return;
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(err);
 
-    ret = esp_elf_relocate(&elf, clock_elf_start);
-    if (ret < 0) {
-        ESP_LOGE(TAG, "esp_elf_relocate failed: %d", ret);
-        esp_elf_deinit(&elf);
-        return;
-    }
+    ESP_ERROR_CHECK(cyd_display_init());
+    ESP_ERROR_CHECK(cyd_touch_init());
+    ESP_ERROR_CHECK(cyd_button_init());
 
-    s_clock_app_running = true;
-    ESP_LOGI(TAG, "Clock ELF loaded; transferring control to app module");
-    esp_elf_request(&elf, 0, 0, NULL);
-    s_clock_app_running = false;
-    s_clock_app_finished = true;
-    ESP_LOGI(TAG, "Clock app returned; unloading ELF");
+    s_ui.progress = -1;
+    s_ui.keep_app = cyd_platform_get_keep_app_on_power_on();
+    refresh_apps();
+    redraw();
+    ESP_LOGI(TAG, "Launcher ready; free heap %" PRIu32 " bytes", esp_get_free_heap_size());
 
-    esp_elf_deinit(&elf);
-    ESP_LOGI(TAG, "Clock ELF unloaded; launcher core remains active");
+    bool was_touched = false;
+    bool button_down = false;
+    int64_t button_since = 0;
+    int64_t last_sd_retry = esp_timer_get_time();
 
     for (;;) {
-        ESP_LOGI(TAG, "Launcher core alive; free heap: %" PRIu32 " bytes",
-                 (uint32_t)esp_get_free_heap_size());
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        int64_t now = esp_timer_get_time();
+
+        /* Touch: tap selects a row; tapping the selected row opens it. */
+        int tx, ty;
+        bool touched = cyd_touch_read(&tx, &ty);
+        if (touched && !was_touched) {
+            int item = item_at(tx, ty);
+            if (item >= 0) {
+                if (item == s_ui.selected) {
+                    activate_selected();
+                } else {
+                    select_item(item);
+                    redraw();
+                }
+            }
+        }
+        was_touched = touched;
+
+        /* BOOT button: short press moves, long press opens. */
+        bool pressed = cyd_button_pressed();
+        if (pressed && !button_down) {
+            button_down = true;
+            button_since = now;
+        } else if (!pressed && button_down) {
+            button_down = false;
+            if (now - button_since >= LONG_PRESS_US) {
+                activate_selected();
+            } else {
+                select_item(s_ui.selected + 1);
+                redraw();
+            }
+        }
+
+        /* Pick up a card inserted after boot. */
+        if (!s_ui.sd_ok && now - last_sd_retry > 2000000) {
+            last_sd_retry = now;
+            refresh_apps();
+            if (s_ui.sd_ok) redraw();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

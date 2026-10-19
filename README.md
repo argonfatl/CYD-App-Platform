@@ -2,72 +2,77 @@
 
 **One device. Many apps.**
 
-CYD App Platform is an open-source application platform for the ESP32 Cheap Yellow Display (CYD). It aims to provide a launcher, a standardized app SDK, and a web-based manager for installing, organizing, and updating compatible applications from GitHub.
+CYD App Platform is an open-source launcher and app platform for the ESP32 Cheap Yellow Display (CYD). It aims to let you keep several apps on an SD card, pick one from a touch menu, and later install and update apps from GitHub.
 
 ## Project status
 
-🚧 **Early prototype.** The Hello World ELF lifecycle has been confirmed on a physical CYD. The current Clock prototype adds a 320x240 landscape UI on the common ILI9341-based CYD while a Clock ELF module runs.
+🚧 **Early prototype.** The firmware-slot launcher builds in CI; it has not yet been validated on hardware. See [ADR 0002](docs/adr/0002-firmware-slot-runtime.md) for the design and the open hardware checks.
 
-## Goals
+## How it works
 
-- Provide a launcher for selecting and starting installed apps.
-- Define a common app manifest and SDK.
-- Keep each app's metadata, assets, and user data organized separately.
-- Allow users to add an app by entering its GitHub repository URL.
-- Check for app releases and download compatible, prebuilt packages.
-- Distinguish community-added apps from apps reviewed and approved for the official catalog.
-- Support a standard exit flow back to the launcher, with device restart as a fallback.
-- Validate downloaded packages and preserve user data during updates.
-- Target the common 2.8-inch CYD class (320x240 landscape UI), while documenting hardware variants explicitly.
+Every app is an ordinary, complete ESP32 firmware image (Arduino or ESP-IDF).
 
-## Current prototype
+1. The **launcher** is flashed once into the `factory` partition.
+2. Apps live on the SD card in `/apps/<app-id>/` as `app.bin` plus `manifest.json`.
+3. When you open an app, the launcher checks its SHA-256, writes it into the `ota_0` slot (skipped if that exact app is already installed), and reboots into it.
+4. An app returns to the launcher by calling `cyd_platform_return_to_launcher()` (ESP-IDF) or `cydReturnToLauncher()` (Arduino).
+5. Apps that know nothing about the platform still get a way back: pressing **RST** or power-cycling returns to the launcher. This can be switched off in the launcher if you want the last app to start on power-on.
 
-The prototype uses ESP-IDF and Espressif's ELF Loader as a candidate runtime. Hello World is kept as a build regression check; Clock is embedded in the launcher.
+The launcher works with touch or with the **BOOT** button alone: short press moves to the next item, long press opens it.
 
-The launcher initializes the ILI9341 display using the common 2.8-inch CYD pin mapping and renders a digital elapsed-time screen while the Clock ELF module runs for 30 seconds. When the module returns, the screen status changes to `APP FINISHED`. The displayed counter is elapsed time since boot, not wall-clock time; Wi-Fi/NTP and an app display SDK are future steps.
+## Quick start
 
-To build locally from a shell with ESP-IDF activated:
+1. Download `cyd-launcher-full.bin` and `cyd-sd-card.zip` from a CI run or release.
+2. Flash the launcher once, for example with `esptool.py write_flash 0x0 cyd-launcher-full.bin` or the [ESP Web Flasher](https://espressif.github.io/esptool-js/).
+3. Unzip `cyd-sd-card.zip` to the root of a FAT32 microSD card and insert it.
 
-```sh
-./tools/build-elf-prototype.sh
+To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/development.md](docs/development.md).
+
+## Repository layout
+
+- `firmware/launcher/` — the launcher, its partition table, and the bootloader hook.
+- `components/cyd_board/` — display (stripe renderer, no full framebuffer), touch, SD, and button support.
+- `components/cyd_platform/` — the small API apps use to return to the launcher.
+- `sdk/arduino/` — a single header for Arduino-ESP32 apps.
+- `apps/examples/hello-app/` — a minimal example app.
+- `docs/` — architecture notes and decision records.
+
+## Making an app
+
+Any firmware built for the original ESP32 with 4 MB flash can run, as long as it:
+
+- fits in the 3 MB app slot;
+- does not need its own SPIFFS/LittleFS partition (use NVS or the SD card for data);
+- uses its own NVS namespace, because NVS is shared with the launcher.
+
+Add a `manifest.json` next to `app.bin`:
+
+```json
+{
+  "id": "hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "sdk": 1,
+  "binary": "app.bin",
+  "sha256": "<sha-256 of app.bin, optional but recommended>"
+}
 ```
 
-GitHub Actions builds the Hello World and Clock ELF modules, the launcher firmware, and the merged flashable binary. Successful runs publish a `cyd-app-platform-elf-prototype` artifact.
+## Roadmap
 
-This is a runtime experiment, not yet a finished launcher. It does not yet include filesystem-based app installation, a full app SDK, or GitHub manager.
-
-## Planned architecture
-
-- **Core** — shared hardware services and platform lifecycle.
-- **Launcher** — app list, app launch/exit, platform settings.
-- **App SDK** — documented API for compatible apps.
-- **App Library** — installed app metadata, versions, source repository, and trust status.
-- **Web Manager** — add repositories, inspect metadata, install, update, and remove apps.
-- **Package tooling** — manifest validation and target-specific packages.
-- **Examples** — Hello World and Clock modules to validate the SDK.
-
-## Important design principle
-
-An ordinary firmware `.bin` stored in a folder is not directly executable by ESP32. ELF modules may enable switching without rebooting, but they need a compatible toolchain, defined APIs, and careful resource cleanup. The runtime remains provisional until it has been tested on the target CYD.
-
-## Initial milestones
-
-1. Build and flash the ESP-IDF launcher skeleton.
-2. Load and unload the Hello World ELF module.
-3. Test repeated load/unload cycles and memory recovery.
-4. Load modules from a filesystem instead of embedding them.
-5. Define the app lifecycle and SDK contract.
-6. Add a local app registry and per-app data directories.
-7. Add GitHub repository registration and package updates.
-8. Adapt [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) if its requirements fit the selected runtime.
+1. Validate the launcher, touch calibration, and power-on return on a physical CYD.
+2. Run [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) from the app slot.
+3. Wi-Fi setup screen and a shared settings store.
+4. Install and update apps from GitHub releases, with a trusted catalog of reviewed apps.
+5. Optional lightweight runtime (scripts or WebAssembly) for small apps that should switch instantly.
 
 ## App trust and security
 
-Apps from arbitrary repositories must be treated as unreviewed code. A repository cannot declare itself officially approved in its own manifest; approval must come from trusted platform metadata. Package integrity must be checked before installation. ELF loading is not a security sandbox, so third-party apps execute with platform privileges.
+Apps are native firmware with full access to the device. Apps from arbitrary repositories must be treated as unreviewed code. A repository cannot declare itself officially approved in its own manifest; approval must come from trusted platform metadata. The launcher refuses to install an app whose SHA-256 does not match its manifest.
 
 ## Contributing
 
-The runtime, SDK, manifest format, and packaging conventions are still being designed. Please open an issue to discuss significant architectural changes before investing in an app port.
+The manifest format and platform API are still being designed. Please open an issue to discuss significant changes before investing in an app port.
 
 ## License
 
