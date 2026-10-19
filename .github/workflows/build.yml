@@ -26,7 +26,7 @@ jobs:
 
       - name: Build Hello World, Clock ELF, and launcher firmware
         run: |
-          bash -c 'source "$IDF_PATH/export.sh" && ./tools/build-elf-prototype.sh'
+          bash -c 'source "$IDF_PATH/export.sh" && bash tools/build-elf-prototype.sh'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
