@@ -6,7 +6,7 @@ CYD App Platform is an open-source launcher and app platform for the ESP32 Cheap
 
 ## Project status
 
-🚧 **Early prototype.** The firmware-slot launcher builds in CI; it has not yet been validated on hardware. See [ADR 0002](docs/adr/0002-firmware-slot-runtime.md) for the design and the open hardware checks.
+🚧 **Early prototype.** The firmware-slot launcher builds in CI and boots on a physical ESP32-2432S028R: it reads the SD card and lists apps from their manifests. Display mirroring and colors were corrected after that first test. Touch, installing and switching apps, and returning to the launcher are still being checked. See [ADR 0002](docs/adr/0002-firmware-slot-runtime.md) for the design and [docs/development.md](docs/development.md) for the hardware checklist.
 
 ## How it works
 
@@ -31,7 +31,7 @@ To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/de
 ## Repository layout
 
 - `firmware/launcher/` — the launcher, its partition table, and the bootloader hook.
-- `components/cyd_board/` — display (stripe renderer, no full framebuffer), touch, SD, and button support.
+- `components/cyd_board/` — display (stripe renderer, no full framebuffer), touch, SD, and button support. Pins, panel orientation, color inversion, and touch calibration are constants in `include/cyd_board.h`.
 - `components/cyd_platform/` — the small API apps use to return to the launcher.
 - `sdk/arduino/` — a single header for Arduino-ESP32 apps.
 - `apps/examples/hello-app/` — a minimal example app.
