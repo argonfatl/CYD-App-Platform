@@ -26,6 +26,20 @@ void onExitPressed() {
 
 Build for ESP32 Dev Module with 4 MB flash. The partition scheme chosen in the IDE does not matter at run time because the device keeps the platform's partition table, but the app must fit in the 2.6 MB slot and must not need a SPIFFS/LittleFS partition.
 
+### Touch calibration in Arduino apps
+
+The same header reads the calibration saved by the Touch Setup app:
+
+```cpp
+CYDTouchCalibration cal;
+if (cydGetTouchCalibration(cal)) {
+    int x, y;
+    cydMapTouch(cal, rawX, rawY, x, y); // rawX = XPT2046 cmd 0xD0, rawY = cmd 0x90
+}
+```
+
+ESP-IDF apps that use `cyd_board` get it automatically from `cyd_touch_init()`.
+
 ## Rules for apps
 
 - Use your own NVS namespace; NVS is shared.

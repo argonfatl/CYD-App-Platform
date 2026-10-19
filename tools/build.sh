@@ -66,9 +66,10 @@ open(dst, "a").write("\n")
 PY
 }
 
-for app_dir in "$ROOT_DIR"/apps/examples/*/; do
-    if [ -f "$app_dir/manifest.json" ]; then
-        package_app "${app_dir%/}"
+# System apps live in apps/<name>/, examples in apps/examples/<name>/.
+for manifest in "$ROOT_DIR"/apps/*/manifest.json "$ROOT_DIR"/apps/examples/*/manifest.json; do
+    if [ -f "$manifest" ]; then
+        package_app "$(dirname "$manifest")"
     fi
 done
 

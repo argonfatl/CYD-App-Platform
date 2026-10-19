@@ -38,7 +38,10 @@ extern "C" {
 #define CYD_TOUCH_PIN_CS     33
 #define CYD_TOUCH_PIN_IRQ    36
 
-/* Raw touch range and orientation for landscape. Calibrate on your board. */
+/*
+ * Default raw touch range and orientation for landscape, used until the touch
+ * calibration app has saved a calibration (see cyd_platform_get_touch_calibration).
+ */
 #define CYD_TOUCH_RAW_X_MIN  200
 #define CYD_TOUCH_RAW_X_MAX  3700
 #define CYD_TOUCH_RAW_Y_MIN  240
@@ -90,9 +93,16 @@ void cyd_fill_rect(cyd_canvas_t *c, int x, int y, int w, int h, uint16_t color);
 void cyd_draw_text(cyd_canvas_t *c, const char *text, int x, int y, int scale, uint16_t color);
 int cyd_text_width(const char *text, int scale);
 
+/* Initializes touch and loads the saved calibration, or the defaults above. */
 esp_err_t cyd_touch_init(void);
 /* Returns true and screen coordinates while the panel is pressed. */
 bool cyd_touch_read(int *x, int *y);
+/* Returns true and averaged raw 12-bit readings (X = cmd 0xD0, Y = cmd 0x90) while pressed. */
+bool cyd_touch_read_raw(int *raw_x, int *raw_y);
+/* Affine map used by cyd_touch_read: x = m0*rx + m1*ry + m2, y = m3*rx + m4*ry + m5. */
+void cyd_touch_set_calibration(const float m[6]);
+void cyd_touch_get_calibration(float m[6]);
+void cyd_touch_get_default_calibration(float m[6]);
 
 esp_err_t cyd_button_init(void);
 bool cyd_button_pressed(void);

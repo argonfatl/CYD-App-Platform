@@ -4,7 +4,7 @@
 
 The initial target is the common 2.8-inch CYD (ESP32-2432S028R): original ESP32, 4 MB flash, ILI9341 display, XPT2046 touch, microSD. Pins and panel settings are in `components/cyd_board/include/cyd_board.h`; other variants need changes there.
 
-If the image is mirrored or the colors look inverted (dark backgrounds shown as white), change `CYD_LCD_MIRROR_X`, `CYD_LCD_MIRROR_Y`, or `CYD_LCD_INVERT_COLORS`. If touches land in the wrong place, adjust the `CYD_TOUCH_*` constants.
+If the image is mirrored or the colors look inverted (dark backgrounds shown as white), change `CYD_LCD_MIRROR_X`, `CYD_LCD_MIRROR_Y`, or `CYD_LCD_INVERT_COLORS`. If touches land in the wrong place, run the Touch Setup app; the `CYD_TOUCH_*` constants are only the defaults used before calibration.
 
 ## Toolchain
 
@@ -51,6 +51,8 @@ Then use `otatool.py switch_ota_partition --slot 0` from ESP-IDF, or open the ap
 - [x] Image is not mirrored and colors are correct.
 - [ ] Footer buttons (power-on setting, launcher update) and status line do not overlap.
 - [x] Touch selects the right row.
+- [ ] Touch Setup: targets accept presses, the test screen follows the stylus, SAVE persists across reboots and is used by the launcher and Hello.
+- [ ] Touch Setup: REDO restarts, holding BOOT leaves without saving, a sloppy calibration is rejected.
 - [x] BOOT short press moves, long press opens.
 - [x] Installing Hello from SD works.
 - [ ] Opening the same app again skips flashing.

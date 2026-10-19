@@ -4,6 +4,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include "cyd_platform_layout.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -24,6 +25,12 @@ bool cyd_platform_get_keep_app_on_power_on(void);
 
 /** Change the power-on policy. Used by the launcher settings. */
 esp_err_t cyd_platform_set_keep_app_on_power_on(bool keep);
+
+/** Read the saved touch calibration. Returns false if the touch screen was never calibrated. */
+bool cyd_platform_get_touch_calibration(cyd_touch_cal_t *cal);
+
+/** Save a touch calibration for all apps. Written by the touch calibration app. */
+esp_err_t cyd_platform_set_touch_calibration(const cyd_touch_cal_t *cal);
 
 #ifdef __cplusplus
 }
