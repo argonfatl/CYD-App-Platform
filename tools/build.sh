@@ -3,7 +3,9 @@
 #   dist/cyd-launcher-full.bin   flash once at offset 0x0
 #   dist/cyd-launcher.bin/.json  launcher image and metadata for Wi-Fi self-update
 #   dist/catalog.json, app-*.bin app catalog for the launcher's GET APPS screen
-#   dist/sd/apps/<id>/           copy to the SD card root
+#   dist/sd/apps/<id>/, cyd-sd-card.zip  copy to the SD card root
+#
+# Set CYD_SKIP_PIO=1 to skip PlatformIO apps, CYD_SKIP_PACKAGE=1 to skip the final packaging step.
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -40,63 +42,45 @@ json.dump(meta, open(dst, "w"), indent=2)
 open(dst, "a").write("\n")
 PY
 
-# Package one app: build it, copy app.bin, and write manifest.json with its SHA-256.
-package_app() {
-    local app_dir="$1"
-    local app_id
+# Build one ESP-IDF app and copy app.bin plus its manifest (with SHA-256) to the SD folder.
+build_idf_app() {
+    local app_dir="$1" app_id app_bin out
     app_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$app_dir/manifest.json")"
 
     echo "==> Building app '$app_id'"
     (cd "$app_dir" && idf.py build)
 
-    local app_bin out
     app_bin="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["app_bin"])' \
         "$app_dir/build/project_description.json")"
     out="$DIST/sd/apps/$app_id"
     mkdir -p "$out"
     cp "$app_dir/build/$app_bin" "$out/app.bin"
-
-    python3 - "$app_dir/manifest.json" "$out/app.bin" "$out/manifest.json" <<'PY'
-import hashlib, json, sys
-src, binary, dst = sys.argv[1:]
-manifest = json.load(open(src))
-manifest["binary"] = "app.bin"
-manifest["sha256"] = hashlib.sha256(open(binary, "rb").read()).hexdigest()
-json.dump(manifest, open(dst, "w"), indent=2)
-open(dst, "a").write("\n")
-PY
+    python3 "$ROOT_DIR/tools/write_app_manifest.py" "$app_dir/manifest.json" "$out/app.bin" "$out/manifest.json"
 }
 
 # System apps live in apps/<name>/, examples in apps/examples/<name>/.
+# Apps with a platformio.ini are Arduino apps built with PlatformIO.
 for manifest in "$ROOT_DIR"/apps/*/manifest.json "$ROOT_DIR"/apps/examples/*/manifest.json; do
-    if [ -f "$manifest" ]; then
-        package_app "$(dirname "$manifest")"
+    [ -f "$manifest" ] || continue
+    app_dir="$(dirname "$manifest")"
+    if [ -f "$app_dir/platformio.ini" ]; then
+        if [ "${CYD_SKIP_PIO:-0}" = "1" ]; then
+            echo "==> Skipping PlatformIO app in $app_dir (CYD_SKIP_PIO=1)"
+        elif command -v pio >/dev/null 2>&1; then
+            "$ROOT_DIR/tools/build-pio-app.sh" "$app_dir" "$DIST"
+        else
+            echo "WARNING: pio not found; skipping PlatformIO app in $app_dir" >&2
+        fi
+    else
+        build_idf_app "$app_dir"
     fi
 done
 
-# Catalog for the launcher's GET APPS screen: one app-<id>.bin per app, with
-# download URLs pointing at the release this build becomes (see ADR 0004).
-python3 - "$DIST" "$LAUNCHER_DIR/build/project_description.json" "${GITHUB_REPOSITORY:-argonfatl/CYD-App-Platform}" <<'PY'
-import glob, json, os, shutil, sys
-dist, desc, repo = sys.argv[1:]
-release = json.load(open(desc))["project_version"]
-apps = []
-for manifest_path in sorted(glob.glob(os.path.join(dist, "sd", "apps", "*", "manifest.json"))):
-    manifest = json.load(open(manifest_path))
-    asset = "app-%s.bin" % manifest["id"]
-    binary = os.path.join(os.path.dirname(manifest_path), manifest["binary"])
-    shutil.copyfile(binary, os.path.join(dist, asset))
-    entry = {key: manifest[key] for key in ("id", "name", "version", "description") if key in manifest}
-    entry["url"] = "https://github.com/%s/releases/download/%s/%s" % (repo, release, asset)
-    entry["sha256"] = manifest["sha256"]
-    entry["size"] = os.path.getsize(binary)
-    apps.append(entry)
-with open(os.path.join(dist, "catalog.json"), "w") as f:
-    json.dump({"version": release, "apps": apps}, f, indent=2)
-    f.write("\n")
-PY
-
-(cd "$DIST" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
+# Catalog, SD card zip, and checksums. CI runs this in a later job, after the
+# PlatformIO apps (built separately) are added to dist/.
+if [ "${CYD_SKIP_PACKAGE:-0}" != "1" ]; then
+    python3 "$ROOT_DIR/tools/package.py" "$DIST"
+fi
 
 echo
 echo "Build complete:"

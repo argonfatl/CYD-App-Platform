@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build launcher and example apps
+    name: Build launcher and ESP-IDF apps
     runs-on: ubuntu-24.04
     # Pin an exact ESP-IDF release so builds are reproducible.
     container:
@@ -69,11 +69,78 @@ jobs:
           source "$IDF_PATH/export.sh"
           idf.py --version
           ccache --zero-stats
-          ./tools/build.sh
+          # PlatformIO apps and packaging run in the jobs below.
+          CYD_SKIP_PIO=1 CYD_SKIP_PACKAGE=1 ./tools/build.sh
           ccache --show-stats
 
-      - name: Package the SD card folder
-        run: cd dist/sd && python3 -m zipfile -c ../cyd-sd-card.zip apps
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: idf-build
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  arduino:
+    name: Build PlatformIO apps
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('apps/**/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build PlatformIO apps
+        run: |
+          set -euo pipefail
+          mkdir -p dist/sd/apps
+          for ini in apps/*/platformio.ini apps/examples/*/platformio.ini; do
+            [ -f "$ini" ] || continue
+            ./tools/build-pio-app.sh "$(dirname "$ini")" dist
+          done
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: arduino-build
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Package
+    needs: [build, arduino]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: '*-build'
+          path: dist
+          merge-multiple: true
+
+      - name: Make catalog, SD card zip, and checksums
+        run: python3 tools/package.py dist "$GITHUB_REPOSITORY"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

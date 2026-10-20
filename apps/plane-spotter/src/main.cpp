@@ -34,6 +34,16 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 
+// Built as an app for CYD App Platform (apps/plane-spotter/platformio.ini sets this).
+// The launcher installs and updates the app, so the firmware's own update paths
+// (GitHub, browser upload, ArduinoOTA) are replaced by "Exit to launcher".
+#ifndef CYD_PLATFORM
+#define CYD_PLATFORM 0
+#endif
+#if CYD_PLATFORM
+#include <CYDPlatform.h>
+#endif
+
 // =======================================================================
 // CONFIGURATION — loaded from config.env (optional: WiFi and location can
 // also be set up on the device through the setup portal)
@@ -1560,11 +1570,15 @@ void dataFetcherTask(void* param) {
     refreshRequested = false;
     if (WiFi.status() == WL_CONNECTED) {
       // Update from GitHub (web page), and the release check (on request, at boot, twice a day)
+#if !CYD_PLATFORM
       if (ghUpdateRequested) { ghUpdateRequested = false; runGithubUpdate(); }
       if (ghCheckRequested || !ghCheckedMs || millis() - ghCheckedMs >= GH_CHECK_INTERVAL_MS) {
         ghCheckRequested = false;
         checkLatestRelease();
       }
+#else
+      ghUpdateRequested = ghCheckRequested = false;   // updates come from the launcher
+#endif
 
       // "Locate by IP" from the settings screen
       if (ipLocateRequested) {
@@ -2576,6 +2590,10 @@ void screenSettings(bool newPage) {
   if (edge != C_EDGE) tft.drawRoundRect(ub.x + 1, ub.y + 1, ub.w - 2, ub.h - 2, 5, edge);
 
   char ul[32];
+#if CYD_PLATFORM
+  // Under CYD App Platform this button leaves to the launcher instead of updating
+  snprintf(ul, sizeof(ul), "%s", updArmed ? "Tap again" : "Launcher");
+#else
   if (!online)                    snprintf(ul, sizeof(ul), "No WiFi");
   else if (updArmed)              snprintf(ul, sizeof(ul), "Tap again");
   else if (ghState == GH_CHECKING) snprintf(ul, sizeof(ul), "Checking...");
@@ -2584,6 +2602,7 @@ void screenSettings(bool newPage) {
   else if (updAvail)              snprintf(ul, sizeof(ul), "Update %s", ghLatest);
   else if (ghLatest[0])           snprintf(ul, sizeof(ul), "Up to date");
   else                            snprintf(ul, sizeof(ul), "Updates");
+#endif
   tft.setFreeFont(&FreeSansBold9pt7b);
   tft.setTextColor(updArmed ? C_WARN : updAvail ? C_GREEN : C_TEXT, C_PANEL);
   tft.setTextDatum(TC_DATUM);
@@ -3334,6 +3353,12 @@ void handleMenuButton(int b) {
       prefs.putUChar("theme", themeIdx);
       break;
     case MB_UPDATE:
+#if CYD_PLATFORM
+      // Leaving restarts the device, so it needs a confirming second tap
+      if (stillBefore(updConfirmUntil)) { updConfirmUntil = 0; cydReturnToLauncher(); }
+      else updConfirmUntil = millis() + 3000;
+      break;
+#endif
       if (WiFi.status() != WL_CONNECTED) break;
       if (ghState == GH_CHECKING || ghState == GH_DOWNLOADING) break;
       if (ghAvailable()) {
@@ -3603,6 +3628,31 @@ bool switchToPreviousFirmware() {
 // ---------------------------------------------------------------------------
 // Web Server — Config Page
 // ---------------------------------------------------------------------------
+// Firmware card of the web page. Under CYD App Platform the launcher handles updates,
+// so the card offers a way back to the launcher instead of the update controls.
+String firmwareCard(const String& rollback) {
+#if CYD_PLATFORM
+  (void)rollback;
+  return String(R"rawliteral(  <div style="font-size:0.9em;color:#aaa">Version <b>)rawliteral") + FW_VERSION +
+         R"rawliteral(</b>, installed by <b>CYD App Platform</b>. Updates come from the launcher's GET APPS screen.</div>
+  <div id="gh" style="display:none"></div><button type="button" id="ghi" style="display:none"></button>
+  <button type="button" onclick="if(confirm('Return to the CYD App Platform launcher?'))post('/launcher','',function(){flash('Returning to the launcher...')})">Exit to launcher</button>
+  <button type="button" class="opt" style="text-align:center" onclick="post('/calibrate','',function(){flash('Calibration started on the device screen')})">Calibrate touch screen</button>)rawliteral";
+#else
+  return String(R"rawliteral(  <div style="font-size:0.9em;color:#aaa">Version <b>)rawliteral" + String(FW_VERSION) + R"rawliteral(</b>, build <b>)rawliteral" + String(BUILD_ENV) + R"rawliteral(</b>. Upload <code>firmware.bin</code> or <code>*-merged.bin</code> from the <b>)rawliteral" + String(BUILD_ENV) + R"rawliteral(</b> build on GitHub.</div>
+  <input type="file" id="fw" accept=".bin" style="margin-top:12px">
+  <progress id="fwp" max="100" value="0" style="width:100%;margin-top:10px;display:none"></progress>
+  <div id="gh" style="font-size:0.9em;color:#aaa;margin-top:12px">Checking GitHub...</div>
+  <button type="button" id="ghi" style="display:none" onclick="ghInstall()">Install from GitHub</button>
+  <button type="button" class="opt" style="text-align:center" onclick="ghCheck()">Check for updates</button>
+  )rawliteral") + rollback + R"rawliteral(
+  <div class="hint" style="margin-top:14px">Or upload a file:</div>
+  <div id="fws" class="hint"></div>
+  <button type="button" onclick="upload()">Update firmware</button>
+  <button type="button" class="opt" style="text-align:center" onclick="post('/calibrate','',function(){flash('Calibration started on the device screen')})">Calibrate touch screen</button>)rawliteral";
+#endif
+}
+
 void initWebServer() {
   // GET / — serve config page
   server.on("/", []() {
@@ -3824,17 +3874,7 @@ void initWebServer() {
 </div>
 <div class="card">
   <h2>Firmware</h2>
-  <div style="font-size:0.9em;color:#aaa">Version <b>)rawliteral" + String(FW_VERSION) + R"rawliteral(</b>, build <b>)rawliteral" + String(BUILD_ENV) + R"rawliteral(</b>. Upload <code>firmware.bin</code> or <code>*-merged.bin</code> from the <b>)rawliteral" + String(BUILD_ENV) + R"rawliteral(</b> build on GitHub.</div>
-  <input type="file" id="fw" accept=".bin" style="margin-top:12px">
-  <progress id="fwp" max="100" value="0" style="width:100%;margin-top:10px;display:none"></progress>
-  <div id="gh" style="font-size:0.9em;color:#aaa;margin-top:12px">Checking GitHub...</div>
-  <button type="button" id="ghi" style="display:none" onclick="ghInstall()">Install from GitHub</button>
-  <button type="button" class="opt" style="text-align:center" onclick="ghCheck()">Check for updates</button>
-  )rawliteral" + rollback + R"rawliteral(
-  <div class="hint" style="margin-top:14px">Or upload a file:</div>
-  <div id="fws" class="hint"></div>
-  <button type="button" onclick="upload()">Update firmware</button>
-  <button type="button" class="opt" style="text-align:center" onclick="post('/calibrate','',function(){flash('Calibration started on the device screen')})">Calibrate touch screen</button>
+)rawliteral" + firmwareCard(rollback) + R"rawliteral(
 </div>
 <div class="card">
   <h2>WiFi</h2>
@@ -4136,6 +4176,17 @@ function forget(){
     server.send(200, "text/plain", "OK");
   });
 
+#if CYD_PLATFORM
+  // Installed by CYD App Platform: updates come from the launcher, and the page can return to it
+  server.on("/update", HTTP_POST, []() {
+    server.send(403, "text/plain", "Updates come from the CYD App Platform launcher (GET APPS)");
+  });
+  server.on("/launcher", HTTP_POST, []() {
+    server.send(200, "text/plain", "OK");
+    delay(500);
+    cydReturnToLauncher();
+  });
+#else
   // POST /update — firmware upload from the browser
   server.on("/update", HTTP_POST, []() {
     bool ok = !otaUp.err;
@@ -4146,6 +4197,7 @@ function forget(){
     delay(2500);
     otaActive = false; lastScreen = 255;   // back to normal operation
   }, handleUpdateChunk);
+#endif
   const char* hdrs[] = {"Content-Length"};
   server.collectHeaders(hdrs, 1);
 
@@ -4164,6 +4216,7 @@ function forget(){
     server.send(200, "text/plain", "OK");
   });
   server.on("/update-github", HTTP_POST, []() {
+    if (CYD_PLATFORM) { server.send(403, "text/plain", "Updates come from the CYD App Platform launcher"); return; }
     if (!ghLatest[0]) { server.send(409, "text/plain", "No release found yet - press Check for updates"); return; }
     if (ghState == GH_DOWNLOADING) { server.send(409, "text/plain", "Update already running"); return; }
     ghMsg[0] = '\0'; ghPct = 0; ghState = GH_DOWNLOADING; ghUpdateRequested = true;
@@ -4565,7 +4618,9 @@ void setup() {
   if (fsOk) collectionLoad();
 
   initWebServer();
+#if !CYD_PLATFORM
   setupArduinoOta();
+#endif
 
   // Launch background fetcher on Core 0 (Core 1 = Arduino loop)
   xTaskCreatePinnedToCore(
@@ -4646,7 +4701,9 @@ void loop() {
   }
 
   server.handleClient();
+#if !CYD_PLATFORM
   ArduinoOTA.handle();
+#endif
   if (otaActive) { delay(5); return; }   // OTA screen owns the display
 
   // Crash-loop guard: a minute of normal running clears the crash counter
