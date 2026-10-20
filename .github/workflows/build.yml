@@ -64,6 +64,12 @@ jobs:
       - name: Make sure ccache is available
         run: command -v ccache || (apt-get update -qq && apt-get install -y -qq ccache)
 
+      - name: Install PlatformIO for Arduino apps
+        run: python3 -m pip install --user platformio
+
+      - name: Add PlatformIO to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Build launcher and apps
         run: |
           source "$IDF_PATH/export.sh"
