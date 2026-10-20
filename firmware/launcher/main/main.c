@@ -330,15 +330,15 @@ static void draw_main_list(cyd_canvas_t *c)
             draw_right(c, app->version, y + 6, sel ? CYD_BLACK : CYD_GREY);
             name_right -= cyd_text_width(app->version, 1) + 12;
         }
-        draw_clipped_name(c, app->name, 16, y + 8, name_right - 16, 2,
+        draw_clipped_name(c, app->name, 16, y + 4, name_right - 16, 2,
                           sel ? CYD_BLACK : CYD_WHITE);
         int right = CYD_LCD_H_RES - 16;
         if (strcmp(app->id, s_ui.installed_id) == 0) {
-            draw_right(c, "INSTALLED", y + 18, sel ? CYD_BLACK : CYD_GREEN);
+            draw_right(c, "INSTALLED", y + 20, sel ? CYD_BLACK : CYD_GREEN);
             right -= cyd_text_width("INSTALLED", 1) + 8;
         }
         if (app->unreviewed) {
-            cyd_draw_text(c, "GITHUB", right - cyd_text_width("GITHUB", 1), y + 18, 1, sel ? CYD_BLACK : CYD_AMBER);
+            cyd_draw_text(c, "GITHUB", right - cyd_text_width("GITHUB", 1), y + 20, 1, sel ? CYD_BLACK : CYD_AMBER);
         }
     }
 }
@@ -372,7 +372,7 @@ static void draw_store_list(cyd_canvas_t *c)
         }
         if (sel) color = CYD_BLACK;
         draw_right(c, state, y + 6, color);
-        draw_right(c, app->official ? "OFFICIAL" : "GITHUB", y + 18,
+        draw_right(c, app->official ? "OFFICIAL" : "GITHUB", y + 20,
                    sel ? CYD_BLACK : (app->official ? CYD_GREY : CYD_AMBER));
         draw_clipped_name(c, app->name, 16, y + 8,
                           CYD_LCD_H_RES - 32 - cyd_text_width(state, 1) - 12,
