@@ -3,10 +3,10 @@ name: Build CYD App Platform
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
-  # Used by release.yml to build a tag it has just created.
+  # Used by release.yml to build a release tag. Publishing lives in release.yml so
+  # this workflow only ever needs read access.
   workflow_call:
     inputs:
       ref:
@@ -82,26 +82,3 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
-
-  release:
-    name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          name: cyd-app-platform
-          path: dist
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/cyd-launcher-full.bin
-            dist/cyd-launcher.bin
-            dist/cyd-launcher.json
-            dist/cyd-sd-card.zip
-            dist/SHA256SUMS
-          generate_release_notes: true

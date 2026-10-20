@@ -1,9 +1,13 @@
 name: Release
 
-# Creates the next version tag on main, builds it, and publishes a GitHub release.
-# Run it from the Actions tab ("Release" -> "Run workflow") or with:
-#   gh workflow run release.yml -f bump=minor
+# Publishes a GitHub release.
+# - Run it from the Actions tab ("Release" -> "Run workflow") or with
+#   `gh workflow run release.yml -f bump=minor`: it creates the next version tag on
+#   main, builds it, and publishes the release.
+# - Pushing a vX.Y.Z tag by hand builds and publishes that tag.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       bump:
@@ -26,7 +30,7 @@ concurrency:
 jobs:
   tag:
     name: Create version tag
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -80,18 +84,23 @@ jobs:
           git tag -a "$VERSION" -m "$VERSION"
           git push origin "$VERSION"
 
-  # Tags pushed with the workflow token do not trigger other workflows,
-  # so the build runs here instead of through build.yml's tag trigger.
+  # Tags pushed with the workflow token do not trigger workflows again,
+  # so a manual run builds its new tag here. A hand-pushed tag skips `tag`.
   build:
     name: Build
     needs: tag
+    if: >-
+      always() &&
+      (needs.tag.result == 'success' ||
+       (github.event_name == 'push' && needs.tag.result == 'skipped'))
     uses: ./.github/workflows/build.yml
     with:
-      ref: refs/tags/${{ needs.tag.outputs.version }}
+      ref: ${{ needs.tag.outputs.version && format('refs/tags/{0}', needs.tag.outputs.version) || github.ref }}
 
   publish:
     name: Publish GitHub release
     needs: [tag, build]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -103,7 +112,7 @@ jobs:
 
       - name: Check the built version
         env:
-          VERSION: ${{ needs.tag.outputs.version }}
+          VERSION: ${{ needs.tag.outputs.version || github.ref_name }}
         run: |
           built="$(python3 -c 'import json; print(json.load(open("dist/cyd-launcher.json"))["version"])')"
           if [ "$built" != "$VERSION" ]; then
@@ -113,7 +122,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.tag.outputs.version }}
+          tag_name: ${{ needs.tag.outputs.version || github.ref_name }}
           files: |
             dist/cyd-launcher-full.bin
             dist/cyd-launcher.bin
