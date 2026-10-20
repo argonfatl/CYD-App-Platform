@@ -374,7 +374,7 @@ static void draw_store_list(cyd_canvas_t *c)
         draw_right(c, state, y + 6, color);
         draw_right(c, app->official ? "OFFICIAL" : "GITHUB", y + 20,
                    sel ? CYD_BLACK : (app->official ? CYD_GREY : CYD_AMBER));
-        draw_clipped_name(c, app->name, 16, y + 8,
+        draw_clipped_name(c, app->name, 16, y + 4,
                           CYD_LCD_H_RES - 32 - cyd_text_width(state, 1) - 12,
                           2, sel ? CYD_BLACK : CYD_WHITE);
     }
