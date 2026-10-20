@@ -4137,6 +4137,8 @@ function forget(){
     server.send(200, "text/plain", "OK");
   });
 
+#ifndef CYD_PLATFORM_APP
+  // Standalone firmware updates are disabled when running under the platform.
   // POST /update — firmware upload from the browser
   server.on("/update", HTTP_POST, []() {
     bool ok = !otaUp.err;
@@ -4170,6 +4172,8 @@ function forget(){
     ghMsg[0] = '\0'; ghPct = 0; ghState = GH_DOWNLOADING; ghUpdateRequested = true;
     server.send(200, "text/plain", "OK");
   });
+
+#endif // !CYD_PLATFORM_APP
 
   // POST /notify — phone notification settings
   server.on("/notify", HTTP_POST, []() {
@@ -4378,6 +4382,7 @@ function forget(){
     server.send(200, "application/json", out);
   });
 
+#ifndef CYD_PLATFORM_APP
   // POST /rollback — restart into the firmware in the other OTA slot
   server.on("/rollback", HTTP_POST, []() {
     if (!switchToPreviousFirmware()) { server.send(500, "text/plain", "No valid previous firmware"); return; }
@@ -4386,6 +4391,8 @@ function forget(){
     delay(1000);
     ESP.restart();
   });
+
+#endif // !CYD_PLATFORM_APP
 
   // POST /calibrate — run touch calibration on the device
   server.on("/calibrate", HTTP_POST, []() {
@@ -4468,6 +4475,7 @@ void setup() {
   }
   if (prefs.isKey("fw_prev")) prevFwVersion = prefs.getString("fw_prev");
 
+#ifndef CYD_PLATFORM_APP
   // Crash-loop guard: 3 crashes in a row within a minute of boot -> back to the previous firmware
   esp_reset_reason_t rr = esp_reset_reason();
   bool crashed = rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT;
@@ -4485,6 +4493,8 @@ void setup() {
       ESP.restart();
     }
   }
+#endif // !CYD_PLATFORM_APP
+
   // Read only keys that exist: the ESP32 Preferences library logs an error for
   // every missing key, which floods the serial log on first boot.
   #define PREF(key, getter, var) if (prefs.isKey(key)) var = prefs.getter(key, var)
@@ -4561,12 +4571,18 @@ void setup() {
   nearest.valid = false;
 
   // Internal file system (the 128 KB "spiffs" partition) for the type collection
+#ifdef CYD_PLATFORM_APP
+  fsOk = LittleFS.begin(false); // never format storage in a platform app
+#else
   fsOk = LittleFS.begin(true);
+#endif
   Serial.printf("LittleFS: %s\n", fsOk ? "mounted" : "failed");
   if (fsOk) collectionLoad();
 
   initWebServer();
+#ifndef CYD_PLATFORM_APP
   setupArduinoOta();
+#endif
 
   // Launch background fetcher on Core 0 (Core 1 = Arduino loop)
   xTaskCreatePinnedToCore(
@@ -4665,7 +4681,9 @@ void loop() {
   }
 
   server.handleClient();
+#ifndef CYD_PLATFORM_APP
   ArduinoOTA.handle();
+#endif
   if (otaActive) { delay(5); return; }   // OTA screen owns the display
 
   // Crash-loop guard: a minute of normal running clears the crash counter
