@@ -46,15 +46,39 @@ package_app() {
     local app_id
     app_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$app_dir/manifest.json")"
 
-    echo "==> Building app '$app_id'"
-    (cd "$app_dir" && idf.py build)
-
     local app_bin out
-    app_bin="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["app_bin"])' \
-        "$app_dir/build/project_description.json")"
     out="$DIST/sd/apps/$app_id"
     mkdir -p "$out"
-    cp "$app_dir/build/$app_bin" "$out/app.bin"
+
+    if [ -f "$app_dir/platformio.ini" ]; then
+        echo "==> Building Arduino/PlatformIO app '$app_id'"
+        if ! command -v pio >/dev/null 2>&1; then
+            echo "ERROR: PlatformIO CLI (pio) is required to build $app_id" >&2
+            exit 1
+        fi
+        (cd "$app_dir" && pio run -e cyd)
+        app_bin=".pio/build/cyd/firmware.bin"
+        if [ ! -f "$app_dir/$app_bin" ]; then
+            echo "ERROR: PlatformIO did not produce $app_bin" >&2
+            exit 1
+        fi
+        cp "$app_dir/$app_bin" "$out/app.bin"
+        # Enforce the app slot limit before packaging.
+        python3 - "$out/app.bin" <<'PY_SIZE'
+import os, sys
+size = os.path.getsize(sys.argv[1])
+limit = 0x2A0000
+print("Plane Spotter image: %d bytes (slot limit %d bytes)" % (size, limit))
+if size > limit:
+    raise SystemExit("ERROR: app image exceeds ota_0 partition")
+PY_SIZE
+    else
+        echo "==> Building ESP-IDF app '$app_id'"
+        (cd "$app_dir" && idf.py build)
+        app_bin="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["app_bin"])' \
+            "$app_dir/build/project_description.json")"
+        cp "$app_dir/build/$app_bin" "$out/app.bin"
+    fi
 
     python3 - "$app_dir/manifest.json" "$out/app.bin" "$out/manifest.json" <<'PY'
 import hashlib, json, sys
