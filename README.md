@@ -20,6 +20,8 @@ Every app is an ordinary, complete ESP32 firmware image (Arduino or ESP-IDF).
 
 The launcher works with touch or with the **BOOT** button alone: short press moves to the next item, long press opens it.
 
+The header shows the battery level on boards that route the battery voltage to GPIO34 through a 2 × 100 kΩ divider (ELEGOO / LCDwiki ESP32-32E "E32R28T" boards). Other boards show `BAT --`; change `CYD_BAT_ADC_GPIO` and `CYD_BAT_DIVIDER` in `components/cyd_board/include/cyd_board.h` if yours is wired differently.
+
 If touches land in the wrong place, open the **Touch Setup** app from the launcher. It calibrates the screen once for the launcher and all apps. See [apps/touch-calibration](apps/touch-calibration/README.md).
 
 ## Getting apps over Wi-Fi
