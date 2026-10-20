@@ -278,7 +278,7 @@ static void draw_clipped_name(cyd_canvas_t *c, const char *text, int x, int y,
     size_t len = strlen(text);
     if (len >= sizeof(clipped)) len = sizeof(clipped) - 1;
     memcpy(clipped, text, len);
-    clipped[len] = '\\0';
+    clipped[len] = '\0';
 
     if (cyd_text_width(clipped, scale) <= max_width) {
         cyd_draw_text(c, clipped, x, y, scale, color);
@@ -290,16 +290,16 @@ static void draw_clipped_name(cyd_canvas_t *c, const char *text, int x, int y,
             clipped[len - 3] = '.';
             clipped[len - 2] = '.';
             clipped[len - 1] = '.';
-            clipped[len] = '\\0';
+            clipped[len] = '\0';
         } else {
-            clipped[len - 1] = '\\0';
+            clipped[len - 1] = '\0';
         }
         if (cyd_text_width(clipped, scale) <= max_width) {
             cyd_draw_text(c, clipped, x, y, scale, color);
             return;
         }
         len--;
-        clipped[len] = '\\0';
+        clipped[len] = '\0';
     }
 }
 
