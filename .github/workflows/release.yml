@@ -128,5 +128,7 @@ jobs:
             dist/cyd-launcher.bin
             dist/cyd-launcher.json
             dist/cyd-sd-card.zip
+            dist/catalog.json
+            dist/app-*.bin
             dist/SHA256SUMS
           generate_release_notes: true

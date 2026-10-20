@@ -6,12 +6,11 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
-#include "esp_crt_bundle.h"
-#include "esp_http_client.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "http_util.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -25,78 +24,7 @@
 
 static const char *TAG = "self_update";
 
-/* ---------- HTTP ---------- */
-
-typedef esp_err_t (*body_cb_t)(const void *data, int len, void *ctx);
-
-typedef struct {
-    body_cb_t on_body;
-    void *ctx;
-    esp_err_t error;
-} http_ctx_t;
-
-static esp_err_t on_http_event(esp_http_client_event_t *evt)
-{
-    http_ctx_t *ctx = evt->user_data;
-    /* Redirect responses (GitHub -> asset CDN) also carry bodies; ignore them. */
-    if (evt->event_id == HTTP_EVENT_ON_DATA && ctx->error == ESP_OK &&
-        esp_http_client_get_status_code(evt->client) == 200) {
-        ctx->error = ctx->on_body(evt->data, evt->data_len, ctx->ctx);
-    }
-    return ESP_OK;
-}
-
-static esp_err_t http_get(const char *url, body_cb_t on_body, void *body_ctx)
-{
-    http_ctx_t ctx = {.on_body = on_body, .ctx = body_ctx, .error = ESP_OK};
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .event_handler = on_http_event,
-        .user_data = &ctx,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .buffer_size = 4096,     /* GitHub's redirect headers are long */
-        .buffer_size_tx = 2048,
-        .timeout_ms = 15000,
-        .max_redirection_count = 5,
-        .user_agent = "cyd-app-platform-launcher",
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GET %s failed: %s", url, esp_err_to_name(err));
-        return err;
-    }
-    if (status != 200) {
-        ESP_LOGE(TAG, "GET %s returned HTTP %d", url, status);
-        return status == 404 ? ESP_ERR_NOT_FOUND : ESP_FAIL;
-    }
-    return ctx.error;
-}
-
 /* ---------- Release manifest ---------- */
-
-typedef struct {
-    char text[MANIFEST_MAX];
-    int len;
-} text_buf_t;
-
-static esp_err_t collect_text(const void *data, int len, void *ctx)
-{
-    text_buf_t *buf = ctx;
-    if (buf->len + len >= (int)sizeof(buf->text)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    memcpy(buf->text + buf->len, data, len);
-    buf->len += len;
-    buf->text[buf->len] = '\0';
-    return ESP_OK;
-}
 
 static bool is_hex_sha256(const char *s)
 {
@@ -109,17 +37,17 @@ static bool is_hex_sha256(const char *s)
 
 esp_err_t self_update_check(launcher_release_t *out)
 {
-    text_buf_t *buf = calloc(1, sizeof(text_buf_t));
-    if (buf == NULL) return ESP_ERR_NO_MEM;
+    char *text = calloc(1, MANIFEST_MAX);
+    if (text == NULL) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = http_get(MANIFEST_URL, collect_text, buf);
+    esp_err_t err = http_get_text(MANIFEST_URL, text, MANIFEST_MAX);
     if (err != ESP_OK) {
-        free(buf);
+        free(text);
         return err;
     }
 
-    cJSON *root = cJSON_Parse(buf->text);
-    free(buf);
+    cJSON *root = cJSON_Parse(text);
+    free(text);
     const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
     const cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
     const cJSON *size = cJSON_GetObjectItemCaseSensitive(root, "size");

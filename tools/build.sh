@@ -2,6 +2,7 @@
 # Build the launcher and example apps, and assemble a ready-to-use dist/ folder:
 #   dist/cyd-launcher-full.bin   flash once at offset 0x0
 #   dist/cyd-launcher.bin/.json  launcher image and metadata for Wi-Fi self-update
+#   dist/catalog.json, app-*.bin app catalog for the launcher's GET APPS screen
 #   dist/sd/apps/<id>/           copy to the SD card root
 set -euo pipefail
 
@@ -72,6 +73,28 @@ for manifest in "$ROOT_DIR"/apps/*/manifest.json "$ROOT_DIR"/apps/examples/*/man
         package_app "$(dirname "$manifest")"
     fi
 done
+
+# Catalog for the launcher's GET APPS screen: one app-<id>.bin per app, with
+# download URLs pointing at the release this build becomes (see ADR 0004).
+python3 - "$DIST" "$LAUNCHER_DIR/build/project_description.json" "${GITHUB_REPOSITORY:-argonfatl/CYD-App-Platform}" <<'PY'
+import glob, json, os, shutil, sys
+dist, desc, repo = sys.argv[1:]
+release = json.load(open(desc))["project_version"]
+apps = []
+for manifest_path in sorted(glob.glob(os.path.join(dist, "sd", "apps", "*", "manifest.json"))):
+    manifest = json.load(open(manifest_path))
+    asset = "app-%s.bin" % manifest["id"]
+    binary = os.path.join(os.path.dirname(manifest_path), manifest["binary"])
+    shutil.copyfile(binary, os.path.join(dist, asset))
+    entry = {key: manifest[key] for key in ("id", "name", "version", "description") if key in manifest}
+    entry["url"] = "https://github.com/%s/releases/download/%s/%s" % (repo, release, asset)
+    entry["sha256"] = manifest["sha256"]
+    entry["size"] = os.path.getsize(binary)
+    apps.append(entry)
+with open(os.path.join(dist, "catalog.json"), "w") as f:
+    json.dump({"version": release, "apps": apps}, f, indent=2)
+    f.write("\n")
+PY
 
 (cd "$DIST" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
 

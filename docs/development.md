@@ -62,3 +62,6 @@ Then use `otatool.py switch_ota_partition --slot 0` from ESP-IDF, or open the ap
 - [ ] `/wifi.json` is imported and CHECK UPDATE connects to Wi-Fi.
 - [ ] A newer release is offered and installs; the device returns to the launcher with the new version.
 - [ ] Power loss while "UPDATING LAUNCHER" is shown recovers on the next boot.
+- [ ] GET APPS lists the catalog with NEW / UPDATE / INSTALLED and downloads an app to the SD card.
+- [ ] The web page at the shown address loads, adds and removes a repository, and starts a download.
+- [ ] An app from a user repository shows the GITHUB badge in the main list and runs.
