@@ -48,7 +48,11 @@ To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/de
 
 ## Making a release
 
-Push a tag such as `v0.2.0`. CI builds the firmware with that version and publishes `cyd-launcher-full.bin` (USB flashing), `cyd-launcher.bin` and `cyd-launcher.json` (Wi-Fi self-update), `cyd-sd-card.zip`, and `SHA256SUMS`.
+Open **Actions → Release → Run workflow**, pick which part of the version to increase (`patch`, `minor`, or `major`), and run it. The workflow tags the current `main` (for example `v0.2.0` → `v0.3.0`), builds the firmware with that version, checks that the built launcher reports it, and publishes a release with `cyd-launcher-full.bin` (USB flashing), `cyd-launcher.bin` and `cyd-launcher.json` (Wi-Fi self-update), `cyd-sd-card.zip`, and `SHA256SUMS`. You can also enter an exact version instead.
+
+From a terminal: `gh workflow run release.yml -f bump=minor`.
+
+Pushing a `v*` tag by hand still works and publishes a release the same way.
 
 ## Repository layout
 

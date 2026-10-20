@@ -1,0 +1,123 @@
+name: Release
+
+# Creates the next version tag on main, builds it, and publishes a GitHub release.
+# Run it from the Actions tab ("Release" -> "Run workflow") or with:
+#   gh workflow run release.yml -f bump=minor
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to increase
+        type: choice
+        options: [patch, minor, major]
+        default: minor
+      version:
+        description: Exact version instead (for example v1.0.0); leave empty to use bump
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Create version tag
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Work out the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+          latest="${latest:-v0.0.0}"
+          if [ -n "$EXPLICIT" ]; then
+            next="$EXPLICIT"
+            if ! [[ "$next" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Version must look like v1.2.3, got '$next'"
+              exit 1
+            fi
+          else
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            case "$BUMP" in
+              major) next="v$((major + 1)).0.0" ;;
+              minor) next="v${major}.$((minor + 1)).0" ;;
+              patch) next="v${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+          if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+            echo "::error::Tag $next already exists"
+            exit 1
+          fi
+          if [ "$(git tag --points-at HEAD --list 'v*')" != "" ]; then
+            echo "::error::main is already tagged as $(git tag --points-at HEAD --list 'v*'); nothing new to release"
+            exit 1
+          fi
+          echo "Latest release: $latest -> new release: $next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push the tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
+
+  # Tags pushed with the workflow token do not trigger other workflows,
+  # so the build runs here instead of through build.yml's tag trigger.
+  build:
+    name: Build
+    needs: tag
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: refs/tags/${{ needs.tag.outputs.version }}
+
+  publish:
+    name: Publish GitHub release
+    needs: [tag, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: cyd-app-platform
+          path: dist
+
+      - name: Check the built version
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          built="$(python3 -c 'import json; print(json.load(open("dist/cyd-launcher.json"))["version"])')"
+          if [ "$built" != "$VERSION" ]; then
+            echo "::error::Firmware reports version '$built', expected '$VERSION'"
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag.outputs.version }}
+          files: |
+            dist/cyd-launcher-full.bin
+            dist/cyd-launcher.bin
+            dist/cyd-launcher.json
+            dist/cyd-sd-card.zip
+            dist/SHA256SUMS
+          generate_release_notes: true
