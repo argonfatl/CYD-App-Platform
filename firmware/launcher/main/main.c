@@ -270,6 +270,39 @@ static void draw_right(cyd_canvas_t *c, const char *text, int y, uint16_t color)
     cyd_draw_text(c, text, CYD_LCD_H_RES - 16 - cyd_text_width(text, 1), y, 1, color);
 }
 
+/* Draw a name without letting it collide with the metadata on the right. */
+static void draw_clipped_name(cyd_canvas_t *c, const char *text, int x, int y,
+                              int max_width, int scale, uint16_t color)
+{
+    char clipped[32];
+    size_t len = strlen(text);
+    if (len >= sizeof(clipped)) len = sizeof(clipped) - 1;
+    memcpy(clipped, text, len);
+    clipped[len] = '\\0';
+
+    if (cyd_text_width(clipped, scale) <= max_width) {
+        cyd_draw_text(c, clipped, x, y, scale, color);
+        return;
+    }
+
+    while (len > 0) {
+        if (len >= 3) {
+            clipped[len - 3] = '.';
+            clipped[len - 2] = '.';
+            clipped[len - 1] = '.';
+            clipped[len] = '\\0';
+        } else {
+            clipped[len - 1] = '\\0';
+        }
+        if (cyd_text_width(clipped, scale) <= max_width) {
+            cyd_draw_text(c, clipped, x, y, scale, color);
+            return;
+        }
+        len--;
+        clipped[len] = '\\0';
+    }
+}
+
 /* ---------- Drawing ---------- */
 
 static void draw_main_list(cyd_canvas_t *c)
@@ -292,8 +325,13 @@ static void draw_main_list(cyd_canvas_t *c)
         int y = LIST_TOP + row * ROW_HEIGHT;
         bool sel = (i == s_ui.selected);
         draw_row_frame(c, row, sel);
-        cyd_draw_text(c, app->name, 16, y + 8, 2, sel ? CYD_BLACK : CYD_WHITE);
-        if (app->version[0]) draw_right(c, app->version, y + 6, sel ? CYD_BLACK : CYD_GREY);
+        int name_right = CYD_LCD_H_RES - 16;
+        if (app->version[0]) {
+            draw_right(c, app->version, y + 6, sel ? CYD_BLACK : CYD_GREY);
+            name_right -= cyd_text_width(app->version, 1) + 12;
+        }
+        draw_clipped_name(c, app->name, 16, y + 8, name_right - 16, 2,
+                          sel ? CYD_BLACK : CYD_WHITE);
         int right = CYD_LCD_H_RES - 16;
         if (strcmp(app->id, s_ui.installed_id) == 0) {
             draw_right(c, "INSTALLED", y + 18, sel ? CYD_BLACK : CYD_GREEN);
@@ -320,8 +358,6 @@ static void draw_store_list(cyd_canvas_t *c)
         int y = LIST_TOP + row * ROW_HEIGHT;
         bool sel = (i == s_ui.selected);
         draw_row_frame(c, row, sel);
-        cyd_draw_text(c, app->name, 16, y + 8, 2, sel ? CYD_BLACK : CYD_WHITE);
-
         char state[32];
         uint16_t color;
         if (app->state == STORE_NEW) {
@@ -338,6 +374,9 @@ static void draw_store_list(cyd_canvas_t *c)
         draw_right(c, state, y + 6, color);
         draw_right(c, app->official ? "OFFICIAL" : "GITHUB", y + 18,
                    sel ? CYD_BLACK : (app->official ? CYD_GREY : CYD_AMBER));
+        draw_clipped_name(c, app->name, 16, y + 8,
+                          CYD_LCD_H_RES - 32 - cyd_text_width(state, 1) - 12,
+                          2, sel ? CYD_BLACK : CYD_WHITE);
     }
 }
 
@@ -374,14 +413,14 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     int base = list_len();
     if (s_ui.store_mode) {
         bool back_sel = s_ui.selected == base, refresh_sel = s_ui.selected == base + 1;
-        draw_footer_button(c, 0, "BACK", back_sel ? CYD_AMBER : CYD_PANEL, back_sel ? CYD_BLACK : CYD_WHITE);
-        draw_footer_button(c, 1, "REFRESH", refresh_sel ? CYD_AMBER : CYD_PANEL,
+        draw_footer_button(c, 0, "BACK", back_sel ? CYD_CYAN : CYD_PANEL, back_sel ? CYD_BLACK : CYD_WHITE);
+        draw_footer_button(c, 1, "REFRESH", refresh_sel ? CYD_CYAN : CYD_PANEL,
                            refresh_sel ? CYD_BLACK : CYD_WHITE);
     } else {
         bool power_sel = s_ui.selected == base, update_sel = s_ui.selected == base + 1,
              store_sel = s_ui.selected == base + 2;
         draw_footer_button(c, 0, s_ui.keep_app ? "BOOT: LAST APP" : "BOOT: LAUNCHER",
-                           power_sel ? CYD_AMBER : CYD_PANEL, power_sel ? CYD_BLACK : CYD_WHITE);
+                           power_sel ? CYD_CYAN : CYD_PANEL, power_sel ? CYD_BLACK : CYD_WHITE);
 
         char update_text[40];
         if (s_ui.update_ready) {
@@ -390,9 +429,9 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
             snprintf(update_text, sizeof(update_text), "CHECK UPDATE");
         }
         draw_footer_button(c, 1, update_text,
-                           update_sel ? CYD_AMBER : (s_ui.update_ready ? CYD_GREEN : CYD_PANEL),
+                           update_sel ? CYD_CYAN : (s_ui.update_ready ? CYD_GREEN : CYD_PANEL),
                            (update_sel || s_ui.update_ready) ? CYD_BLACK : CYD_WHITE);
-        draw_footer_button(c, 2, "GET APPS", store_sel ? CYD_AMBER : CYD_PANEL, store_sel ? CYD_BLACK : CYD_WHITE);
+        draw_footer_button(c, 2, "GET APPS", store_sel ? CYD_CYAN : CYD_PANEL, store_sel ? CYD_BLACK : CYD_WHITE);
     }
 
     cyd_draw_text(c, s_ui.status, 10, STATUS_Y, 1, s_ui.status_color);
@@ -840,7 +879,7 @@ static void refresh_apps(void)
 
     char sha[65];
     load_installed(s_ui.installed_id, sizeof(s_ui.installed_id), sha, sizeof(sha));
-    set_status(s_ui.count > 0 ? "TAP OR BOOT: NEXT / HOLD BOOT: OPEN" : "", CYD_GREY);
+    set_status(s_ui.count > 0 ? "TAP SELECT, TAP AGAIN OPEN; HOLD BOOT OPEN" : "", CYD_GREY);
 }
 
 void app_main(void)
