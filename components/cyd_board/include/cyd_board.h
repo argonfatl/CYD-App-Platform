@@ -57,6 +57,13 @@ extern "C" {
 #define CYD_SD_PIN_CS        5
 #define CYD_SD_MOUNT_POINT   "/sdcard"
 
+/*
+ * Battery voltage: ELEGOO/LCDwiki ESP32-32E boards (E32R28T) divide BAT+ with
+ * 2 x 100 kOhm into GPIO34 (ADC1). Boards without this divider read as "no battery".
+ */
+#define CYD_BAT_ADC_GPIO     34
+#define CYD_BAT_DIVIDER      2.0f
+
 /* BOOT button (GPIO0, active low). Usable as an input after boot. */
 #define CYD_BUTTON_PIN       0
 
@@ -106,6 +113,15 @@ void cyd_touch_get_default_calibration(float m[6]);
 
 esp_err_t cyd_button_init(void);
 bool cyd_button_pressed(void);
+
+/* Battery monitor. Safe to call on boards without a battery divider. */
+esp_err_t cyd_battery_init(void);
+/*
+ * Sample the battery. Returns false when no battery is detected (reading below 2.5 V
+ * or above 4.5 V). Readings are smoothed across calls; call every few seconds.
+ * Either pointer may be NULL.
+ */
+bool cyd_battery_read(int *millivolts, int *percent);
 
 esp_err_t cyd_sd_mount(void);
 void cyd_sd_unmount(void);

@@ -21,8 +21,6 @@
 #include "web_ui.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
-#include "driver/adc.h"
-#include "esp_adc_cal.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -80,64 +78,29 @@ static char s_version[24];        /* short launcher version shown in the header 
 static bool s_version_is_release; /* built exactly from a vX.Y.Z tag */
 static uint8_t s_chunk[COPY_CHUNK];
 
-/* ELEGOO ESP32-32E battery monitor: battery divider is routed to GPIO34. */
-#define BATTERY_ADC_CHANNEL ADC1_CHANNEL_6 /* GPIO34 */
-#define BATTERY_DIVIDER_RATIO 2.0f
-static esp_adc_cal_characteristics_t s_battery_adc_chars;
-static bool s_battery_adc_ready;
-static float s_battery_voltage;
+/* Battery level from cyd_board (GPIO34 divider on ELEGOO ESP32-32E boards); -1 = no battery. */
 static int s_battery_percent = -1;
 
 static void battery_init(void)
 {
-    if (adc1_config_width(ADC_WIDTH_BIT_12) != ESP_OK ||
-        adc1_config_channel_atten(BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_11) != ESP_OK) {
-        ESP_LOGW(TAG, "Battery ADC setup failed");
-        return;
+    if (cyd_battery_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Battery monitor unavailable");
     }
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12,
-                             1100, &s_battery_adc_chars);
-    s_battery_adc_ready = true;
 }
 
-static void battery_update(void)
+/* Returns true when the shown value should change. Small jitter is ignored. */
+static bool battery_update(void)
 {
-    if (!s_battery_adc_ready) return;
-    uint32_t total_mv = 0;
-    for (int i = 0; i < 8; ++i) {
-        int raw = adc1_get_raw(BATTERY_ADC_CHANNEL);
-        if (raw < 0) return;
-        total_mv += esp_adc_cal_raw_to_voltage((uint32_t)raw, &s_battery_adc_chars);
+    int mv = 0, percent = -1;
+    if (!cyd_battery_read(&mv, &percent)) percent = -1;
+    bool changed = (percent < 0) != (s_battery_percent < 0) ||
+                   (percent >= 0 && (percent >= s_battery_percent + 2 || percent <= s_battery_percent - 2 ||
+                                     percent == 0 || percent == 100) && percent != s_battery_percent);
+    if (changed) {
+        ESP_LOGI(TAG, "Battery %d mV, %d%%", mv, percent);
+        s_battery_percent = percent;
     }
-    float voltage = ((float)total_mv / 8.0f) * BATTERY_DIVIDER_RATIO / 1000.0f;
-    /* Reject disconnected or implausible readings rather than showing a false percentage. */
-    if (voltage < 2.5f || voltage > 4.5f) {
-        s_battery_voltage = 0.0f;
-        s_battery_percent = -1;
-        return;
-    }
-    s_battery_voltage = voltage;
-
-    /* Approximate rested Li-ion cell curve; actual percentage varies under load. */
-    static const struct { float volts; int percent; } curve[] = {
-        {3.30f, 0}, {3.50f, 5}, {3.60f, 10}, {3.70f, 20},
-        {3.75f, 30}, {3.80f, 40}, {3.85f, 50}, {3.90f, 60},
-        {3.95f, 70}, {4.00f, 80}, {4.10f, 90}, {4.20f, 100}
-    };
-    if (voltage <= curve[0].volts) {
-        s_battery_percent = 0;
-    } else {
-        s_battery_percent = 100;
-        for (size_t i = 1; i < sizeof(curve) / sizeof(curve[0]); ++i) {
-            if (voltage <= curve[i].volts) {
-                float fraction = (voltage - curve[i - 1].volts) /
-                                 (curve[i].volts - curve[i - 1].volts);
-                s_battery_percent = curve[i - 1].percent +
-                    (int)((curve[i].percent - curve[i - 1].percent) * fraction + 0.5f);
-                break;
-            }
-        }
-    }
+    return changed;
 }
 
 static void draw_battery(cyd_canvas_t *c)
@@ -158,7 +121,7 @@ static void draw_battery(cyd_canvas_t *c)
     cyd_fill_rect(c, x + 20, y + 4, 3, 5, color);
     int fill = 16 * s_battery_percent / 100;
     if (fill > 0) cyd_fill_rect(c, x + 2, y + 2, fill, 9, color);
-    char label[5];
+    char label[8];
     snprintf(label, sizeof(label), "%d%%", s_battery_percent);
     cyd_draw_text(c, label, CYD_LCD_H_RES - 24, 10, 1, color);
 }
@@ -1009,9 +972,7 @@ void app_main(void)
         int64_t now = esp_timer_get_time();
         if (now - last_battery_update >= 2000000) {
             last_battery_update = now;
-            int previous_percent = s_battery_percent;
-            battery_update();
-            if (previous_percent != s_battery_percent) redraw();
+            if (battery_update()) redraw();
         }
 
         /* Touch: tap selects a row; tapping the selected row opens it. */
