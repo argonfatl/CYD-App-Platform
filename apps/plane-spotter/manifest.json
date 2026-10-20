@@ -1,0 +1,10 @@
+{
+  "id": "plane-spotter",
+  "name": "Plane Spotter",
+  "version": "1.0.0",
+  "sdk": 1,
+  "binary": "app.bin",
+  "description": "Live aircraft overhead, weather and radar.",
+  "platformio_env": "cyd-alt",
+  "upstream": "https://github.com/argonfatl/CYD28PlaneSpotter/tree/ed43e94f1a0b26ff6e72d71c11a9c8c87c5cdd0d"
+}

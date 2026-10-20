@@ -67,6 +67,7 @@ Pushing a `v*` tag by hand still works and publishes a release the same way.
 - `components/cyd_platform/` — the small API apps use to return to the launcher.
 - `sdk/arduino/` — a single header for Arduino-ESP32 apps.
 - `apps/touch-calibration/` — Touch Setup, the system app that calibrates the touch screen.
+- `apps/plane-spotter/` — Plane Spotter, an adapted copy of [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) built with PlatformIO.
 - `apps/examples/hello-app/` — a minimal example app.
 - `docs/` — architecture notes and decision records.
 
@@ -95,7 +96,7 @@ Add a `manifest.json` next to `app.bin`:
 
 1. ~~Validate the launcher on a physical CYD.~~ Done.
 2. ~~Launcher self-update from GitHub releases over Wi-Fi.~~ Done; awaiting hardware test.
-3. Run [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) from the app slot.
+3. ~~Run [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) from the app slot.~~ Plane Spotter is in the catalog; awaiting hardware test.
 4. Wi-Fi setup screen and a shared settings store.
 5. ~~Install and update apps from GitHub releases, with a trusted catalog of reviewed apps.~~ Done; awaiting hardware test.
 6. Optional lightweight runtime (scripts or WebAssembly) for small apps that should switch instantly.
@@ -110,4 +111,4 @@ The manifest format and platform API are still being designed. Please open an is
 
 ## License
 
-[MIT](LICENSE). Third-party apps installed through the platform keep their own licenses.
+[MIT](LICENSE). Third-party apps installed through the platform keep their own licenses; `apps/plane-spotter` is MIT-licensed code from CYD28PlaneSpotter.
