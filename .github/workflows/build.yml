@@ -6,6 +6,13 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+  # Used by release.yml to build a tag it has just created.
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build (for example refs/tags/v0.3.0)
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -37,6 +44,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.ref || github.ref }}
           # Full history and tags so the firmware version is the release tag (e.g. v0.2.0).
           fetch-depth: 0
 
