@@ -101,6 +101,16 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+void launcher_wifi_ip(char *out, int len)
+{
+    out[0] = '\0';
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t info;
+    if (netif && esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0) {
+        snprintf(out, len, IPSTR, IP2STR(&info.ip));
+    }
+}
+
 esp_err_t launcher_wifi_connect(int timeout_ms)
 {
     char ssid[33], pass[65];

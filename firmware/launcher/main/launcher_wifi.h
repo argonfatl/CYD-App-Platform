@@ -14,5 +14,8 @@ void launcher_wifi_import_from_sd(void);
 
 bool launcher_wifi_configured(void);
 
+/* Current IPv4 address as text, or "" when not connected. */
+void launcher_wifi_ip(char *out, int len);
+
 /* Start Wi-Fi in station mode and wait for an IP address. */
 esp_err_t launcher_wifi_connect(int timeout_ms);

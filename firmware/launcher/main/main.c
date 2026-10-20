@@ -14,8 +14,11 @@
 #include "cJSON.h"
 #include "cyd_board.h"
 #include "cyd_platform.h"
+#include "app_store.h"
 #include "launcher_wifi.h"
+#include "http_util.h"
 #include "self_update.h"
+#include "web_ui.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -34,7 +37,6 @@
 #define VISIBLE_ROWS      4
 #define FOOTER_TOP        (LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT + 8)
 #define FOOTER_HEIGHT     22
-#define FOOTER_SPLIT      150
 #define STATUS_Y          (CYD_LCD_V_RES - 14)
 #define LONG_PRESS_US     700000
 #define COPY_CHUNK        4096
@@ -48,12 +50,13 @@ typedef struct {
     char version[16];
     char binary_path[160];
     char sha256[65]; /* expected hash from the manifest, empty if absent */
+    bool unreviewed; /* downloaded from a user-added GitHub repository */
 } app_entry_t;
 
 typedef struct {
     app_entry_t apps[MAX_APPS];
     int count;
-    int selected;         /* 0..count-1 apps, count = power-on setting, count+1 = update */
+    int selected;         /* list rows first, then footer buttons (see footer_count) */
     int scroll;
     bool sd_ok;
     bool keep_app;
@@ -64,9 +67,13 @@ typedef struct {
     char progress_label[48];
     bool update_ready;    /* a newer release was found and can be installed */
     launcher_release_t release;
+    bool store_mode;      /* GET APPS screen is open */
+    char web_ip[20];      /* address of the web interface while the store is open */
 } launcher_t;
 
 static launcher_t s_ui;
+
+static void refresh_apps(void);
 static char s_version[24];        /* short launcher version shown in the header */
 static bool s_version_is_release; /* built exactly from a vX.Y.Z tag */
 static uint8_t s_chunk[COPY_CHUNK];
@@ -135,6 +142,9 @@ static bool load_manifest(const char *dir_name, app_entry_t *app)
     copy_json_string(root, "name", app->name, sizeof(app->name));
     copy_json_string(root, "version", app->version, sizeof(app->version));
     copy_json_string(root, "sha256", app->sha256, sizeof(app->sha256));
+    char source[80] = "";
+    copy_json_string(root, "source", source, sizeof(source));
+    app->unreviewed = strncmp(source, "github:", 7) == 0;
 
     char binary[48] = "app.bin";
     copy_json_string(root, "binary", binary, sizeof(binary));
@@ -221,6 +231,116 @@ static void save_installed(const char *id, const char *sha)
 
 /* ---------- Drawing ---------- */
 
+/* ---------- Layout helpers ---------- */
+
+/* Rows in the current list: apps on the SD card, or apps in the store. */
+static int list_len(void)
+{
+    return s_ui.store_mode ? store_list()->count : s_ui.count;
+}
+
+/* Footer buttons: main screen = power-on, update, get apps; store = back, refresh. */
+static int footer_count(void)
+{
+    return s_ui.store_mode ? 2 : 3;
+}
+
+static void footer_rect(int i, int *x, int *w)
+{
+    int n = footer_count();
+    *w = (CYD_LCD_H_RES - 12 - (n - 1) * 4) / n;
+    *x = 6 + i * (*w + 4);
+}
+
+static void draw_footer_button(cyd_canvas_t *c, int i, const char *label, uint16_t bg, uint16_t fg)
+{
+    int x, w;
+    footer_rect(i, &x, &w);
+    cyd_fill_rect(c, x, FOOTER_TOP, w, FOOTER_HEIGHT, bg);
+    cyd_draw_text(c, label, x + (w - cyd_text_width(label, 1)) / 2, FOOTER_TOP + 7, 1, fg);
+}
+
+static void draw_row_frame(cyd_canvas_t *c, int row, bool sel)
+{
+    cyd_fill_rect(c, 6, LIST_TOP + row * ROW_HEIGHT, CYD_LCD_H_RES - 12, ROW_HEIGHT - 4, sel ? CYD_CYAN : CYD_PANEL);
+}
+
+static void draw_right(cyd_canvas_t *c, const char *text, int y, uint16_t color)
+{
+    cyd_draw_text(c, text, CYD_LCD_H_RES - 16 - cyd_text_width(text, 1), y, 1, color);
+}
+
+/* ---------- Drawing ---------- */
+
+static void draw_main_list(cyd_canvas_t *c)
+{
+    if (!s_ui.sd_ok) {
+        cyd_draw_text(c, "NO SD CARD", 20, 80, 2, CYD_AMBER);
+        cyd_draw_text(c, "INSERT A FAT32 CARD WITH", 20, 115, 1, CYD_WHITE);
+        cyd_draw_text(c, "/APPS/<ID>/MANIFEST.JSON + APP.BIN", 20, 130, 1, CYD_WHITE);
+        return;
+    }
+    if (s_ui.count == 0) {
+        cyd_draw_text(c, "NO APPS YET", 20, 80, 2, CYD_AMBER);
+        cyd_draw_text(c, "OPEN GET APPS TO DOWNLOAD SOME", 20, 115, 1, CYD_WHITE);
+        return;
+    }
+    for (int row = 0; row < VISIBLE_ROWS; ++row) {
+        int i = s_ui.scroll + row;
+        if (i >= s_ui.count) break;
+        const app_entry_t *app = &s_ui.apps[i];
+        int y = LIST_TOP + row * ROW_HEIGHT;
+        bool sel = (i == s_ui.selected);
+        draw_row_frame(c, row, sel);
+        cyd_draw_text(c, app->name, 16, y + 8, 2, sel ? CYD_BLACK : CYD_WHITE);
+        if (app->version[0]) draw_right(c, app->version, y + 6, sel ? CYD_BLACK : CYD_GREY);
+        int right = CYD_LCD_H_RES - 16;
+        if (strcmp(app->id, s_ui.installed_id) == 0) {
+            draw_right(c, "INSTALLED", y + 18, sel ? CYD_BLACK : CYD_GREEN);
+            right -= cyd_text_width("INSTALLED", 1) + 8;
+        }
+        if (app->unreviewed) {
+            cyd_draw_text(c, "GITHUB", right - cyd_text_width("GITHUB", 1), y + 18, 1, sel ? CYD_BLACK : CYD_AMBER);
+        }
+    }
+}
+
+static void draw_store_list(cyd_canvas_t *c)
+{
+    const store_list_t *list = store_list();
+    if (list->count == 0) {
+        cyd_draw_text(c, "NO APPS AVAILABLE", 20, 80, 2, CYD_AMBER);
+        cyd_draw_text(c, list->failed_sources ? list->last_error : "THE CATALOG IS EMPTY", 20, 115, 1, CYD_WHITE);
+        return;
+    }
+    for (int row = 0; row < VISIBLE_ROWS; ++row) {
+        int i = s_ui.scroll + row;
+        if (i >= list->count) break;
+        const store_app_t *app = &list->apps[i];
+        int y = LIST_TOP + row * ROW_HEIGHT;
+        bool sel = (i == s_ui.selected);
+        draw_row_frame(c, row, sel);
+        cyd_draw_text(c, app->name, 16, y + 8, 2, sel ? CYD_BLACK : CYD_WHITE);
+
+        char state[32];
+        uint16_t color;
+        if (app->state == STORE_NEW) {
+            snprintf(state, sizeof(state), "NEW %s", app->version);
+            color = CYD_CYAN;
+        } else if (app->state == STORE_UPDATE) {
+            snprintf(state, sizeof(state), "UPDATE %s", app->version);
+            color = CYD_AMBER;
+        } else {
+            snprintf(state, sizeof(state), "INSTALLED");
+            color = CYD_GREEN;
+        }
+        if (sel) color = CYD_BLACK;
+        draw_right(c, state, y + 6, color);
+        draw_right(c, app->official ? "OFFICIAL" : "GITHUB", y + 18,
+                   sel ? CYD_BLACK : (app->official ? CYD_GREY : CYD_AMBER));
+    }
+}
+
 static void draw_screen(cyd_canvas_t *c, void *ctx)
 {
     (void)ctx;
@@ -228,60 +348,52 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
 
     cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, 32, CYD_PANEL);
     cyd_fill_rect(c, 0, 32, CYD_LCD_H_RES, 2, CYD_CYAN);
-    cyd_draw_text(c, "CYD APPS", 10, 9, 2, CYD_WHITE);
-    /* Launcher version: cyan for a release build, amber for a development build. */
-    cyd_draw_text(c, s_version, CYD_LCD_H_RES - 10 - cyd_text_width(s_version, 2), 9, 2,
-                  s_version_is_release ? CYD_CYAN : CYD_AMBER);
+    if (s_ui.store_mode) {
+        cyd_draw_text(c, "GET APPS", 10, 9, 2, CYD_WHITE);
+        if (s_ui.web_ip[0]) {
+            cyd_draw_text(c, "WEB", CYD_LCD_H_RES - 10 - cyd_text_width(s_ui.web_ip, 1), 6, 1, CYD_GREY);
+            cyd_draw_text(c, s_ui.web_ip, CYD_LCD_H_RES - 10 - cyd_text_width(s_ui.web_ip, 1), 17, 1, CYD_CYAN);
+        }
+    } else {
+        cyd_draw_text(c, "CYD APPS", 10, 9, 2, CYD_WHITE);
+        /* Launcher version: cyan for a release build, amber for a development build. */
+        cyd_draw_text(c, s_version, CYD_LCD_H_RES - 10 - cyd_text_width(s_version, 2), 9, 2,
+                      s_version_is_release ? CYD_CYAN : CYD_AMBER);
+    }
 
     if (s_ui.progress >= 0) {
         cyd_draw_text(c, s_ui.progress_label, 20, 90, 2, CYD_WHITE);
         cyd_fill_rect(c, 20, 120, CYD_LCD_H_RES - 40, 16, CYD_PANEL);
         cyd_fill_rect(c, 20, 120, (CYD_LCD_H_RES - 40) * s_ui.progress / 100, 16, CYD_CYAN);
-    } else if (!s_ui.sd_ok) {
-        cyd_draw_text(c, "NO SD CARD", 20, 80, 2, CYD_AMBER);
-        cyd_draw_text(c, "INSERT A FAT32 CARD WITH", 20, 115, 1, CYD_WHITE);
-        cyd_draw_text(c, "/APPS/<ID>/MANIFEST.JSON + APP.BIN", 20, 130, 1, CYD_WHITE);
-    } else if (s_ui.count == 0) {
-        cyd_draw_text(c, "NO APPS FOUND", 20, 80, 2, CYD_AMBER);
-        cyd_draw_text(c, "COPY APPS TO /APPS/<ID>/ ON THE CARD", 20, 115, 1, CYD_WHITE);
+    } else if (s_ui.store_mode) {
+        draw_store_list(c);
     } else {
-        for (int row = 0; row < VISIBLE_ROWS; ++row) {
-            int i = s_ui.scroll + row;
-            if (i >= s_ui.count) break;
-            const app_entry_t *app = &s_ui.apps[i];
-            int y = LIST_TOP + row * ROW_HEIGHT;
-            bool sel = (i == s_ui.selected);
-            cyd_fill_rect(c, 6, y, CYD_LCD_H_RES - 12, ROW_HEIGHT - 4, sel ? CYD_CYAN : CYD_PANEL);
-            uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
-            cyd_draw_text(c, app->name, 16, y + 8, 2, fg);
-            if (app->version[0]) {
-                cyd_draw_text(c, app->version, CYD_LCD_H_RES - 16 - cyd_text_width(app->version, 1),
-                              y + 6, 1, sel ? CYD_BLACK : CYD_GREY);
-            }
-            if (strcmp(app->id, s_ui.installed_id) == 0) {
-                cyd_draw_text(c, "INSTALLED", CYD_LCD_H_RES - 16 - cyd_text_width("INSTALLED", 1),
-                              y + 18, 1, sel ? CYD_BLACK : CYD_GREEN);
-            }
+        draw_main_list(c);
+    }
+
+    int base = list_len();
+    if (s_ui.store_mode) {
+        bool back_sel = s_ui.selected == base, refresh_sel = s_ui.selected == base + 1;
+        draw_footer_button(c, 0, "BACK", back_sel ? CYD_AMBER : CYD_PANEL, back_sel ? CYD_BLACK : CYD_WHITE);
+        draw_footer_button(c, 1, "REFRESH", refresh_sel ? CYD_AMBER : CYD_PANEL,
+                           refresh_sel ? CYD_BLACK : CYD_WHITE);
+    } else {
+        bool power_sel = s_ui.selected == base, update_sel = s_ui.selected == base + 1,
+             store_sel = s_ui.selected == base + 2;
+        draw_footer_button(c, 0, s_ui.keep_app ? "BOOT: LAST APP" : "BOOT: LAUNCHER",
+                           power_sel ? CYD_AMBER : CYD_PANEL, power_sel ? CYD_BLACK : CYD_WHITE);
+
+        char update_text[40];
+        if (s_ui.update_ready) {
+            snprintf(update_text, sizeof(update_text), "INSTALL %.16s", s_ui.release.version);
+        } else {
+            snprintf(update_text, sizeof(update_text), "CHECK UPDATE");
         }
+        draw_footer_button(c, 1, update_text,
+                           update_sel ? CYD_AMBER : (s_ui.update_ready ? CYD_GREEN : CYD_PANEL),
+                           (update_sel || s_ui.update_ready) ? CYD_BLACK : CYD_WHITE);
+        draw_footer_button(c, 2, "GET APPS", store_sel ? CYD_AMBER : CYD_PANEL, store_sel ? CYD_BLACK : CYD_WHITE);
     }
-
-    /* Footer: power-on setting (left) and launcher update (right). */
-    bool power_sel = (s_ui.selected == s_ui.count);
-    cyd_fill_rect(c, 6, FOOTER_TOP, FOOTER_SPLIT - 9, FOOTER_HEIGHT, power_sel ? CYD_AMBER : CYD_PANEL);
-    cyd_draw_text(c, s_ui.keep_app ? "POWER-ON: LAST APP" : "POWER-ON: LAUNCHER",
-                  14, FOOTER_TOP + 7, 1, power_sel ? CYD_BLACK : CYD_WHITE);
-
-    bool update_sel = (s_ui.selected == s_ui.count + 1);
-    char update_text[40];
-    if (s_ui.update_ready) {
-        snprintf(update_text, sizeof(update_text), "INSTALL %s", s_ui.release.version);
-    } else {
-        snprintf(update_text, sizeof(update_text), "CHECK UPDATE");
-    }
-    uint16_t update_bg = update_sel ? CYD_AMBER : (s_ui.update_ready ? CYD_GREEN : CYD_PANEL);
-    cyd_fill_rect(c, FOOTER_SPLIT + 3, FOOTER_TOP, CYD_LCD_H_RES - FOOTER_SPLIT - 9, FOOTER_HEIGHT, update_bg);
-    cyd_draw_text(c, update_text, FOOTER_SPLIT + 11, FOOTER_TOP + 7, 1,
-                  (update_sel || s_ui.update_ready) ? CYD_BLACK : CYD_WHITE);
 
     cyd_draw_text(c, s_ui.status, 10, STATUS_Y, 1, s_ui.status_color);
 }
@@ -521,13 +633,146 @@ static void update_launcher(void)
     esp_restart();
 }
 
+/* ---------- Get apps (store) ---------- */
+
+static void reset_selection(void)
+{
+    s_ui.selected = 0;
+    s_ui.scroll = 0;
+}
+
+static void store_progress(const char *label, int percent)
+{
+    set_progress(label, percent);
+    if (label) web_ui_set_activity(label);
+}
+
+static void store_reload(void)
+{
+    store_refresh(store_progress);
+    s_ui.progress = -1;
+    web_ui_set_activity("");
+    const store_list_t *list = store_list();
+    if (list->failed_sources > 0) {
+        set_status(list->last_error, CYD_AMBER);
+    } else if (s_ui.web_ip[0]) {
+        char text[48];
+        snprintf(text, sizeof(text), "ADD REPOS AT HTTP://%s", s_ui.web_ip);
+        set_status(text, CYD_GREY);
+    } else {
+        set_status("", CYD_GREY);
+    }
+    if (s_ui.selected >= list->count + footer_count()) reset_selection();
+    redraw();
+}
+
+static void open_store(void)
+{
+    if (!s_ui.sd_ok) {
+        set_status("INSERT AN SD CARD FIRST", CYD_AMBER);
+        redraw();
+        return;
+    }
+    if (!launcher_wifi_configured()) {
+        set_status("ADD /WIFI.JSON TO THE SD CARD", CYD_AMBER);
+        redraw();
+        return;
+    }
+    set_progress("CONNECTING TO WI-FI", 0);
+    esp_err_t err = launcher_wifi_connect(20000);
+    if (err != ESP_OK) {
+        fail("WI-FI CONNECTION FAILED", err);
+        return;
+    }
+    s_ui.store_mode = true;
+    reset_selection();
+    launcher_wifi_ip(s_ui.web_ip, sizeof(s_ui.web_ip));
+    web_ui_start();
+    store_reload();
+}
+
+static void close_store(void)
+{
+    web_ui_stop();
+    s_ui.store_mode = false;
+    s_ui.web_ip[0] = '\0';
+    refresh_apps(); /* pick up newly downloaded apps */
+    redraw();
+}
+
+static void install_from_store(int index)
+{
+    store_app_t app = store_list()->apps[index]; /* copy: the list may be refreshed */
+    char label[48];
+    snprintf(label, sizeof(label), "DOWNLOADING %.24s", app.name);
+    store_progress(label, 0);
+    esp_err_t err = store_install(&app, store_progress);
+    s_ui.progress = -1;
+    web_ui_set_activity("");
+    if (err != ESP_OK) {
+        char text[48];
+        snprintf(text, sizeof(text), "%.24s: %s", app.name,
+                 err == ESP_ERR_INVALID_CRC ? "SHA-256 MISMATCH" : http_last_error());
+        fail(text, err);
+        return;
+    }
+    store_lock();
+    store_app_t *entry = &store_list()->apps[index];
+    if (strcmp(entry->id, app.id) == 0) {
+        entry->state = STORE_INSTALLED;
+        snprintf(entry->installed_version, sizeof(entry->installed_version), "%s", app.version);
+    }
+    store_unlock();
+    char text[48];
+    snprintf(text, sizeof(text), "%.24s SAVED TO THE SD CARD", app.name);
+    set_status(text, CYD_GREEN);
+    redraw();
+}
+
+static void activate_store_item(void)
+{
+    const store_list_t *list = store_list();
+    int i = s_ui.selected;
+    if (i == list->count) {
+        close_store();
+    } else if (i == list->count + 1) {
+        store_reload();
+    } else if (i >= 0 && i < list->count) {
+        if (list->apps[i].state == STORE_INSTALLED) {
+            set_status("ALREADY ON THE SD CARD", CYD_GREY);
+            redraw();
+        } else {
+            install_from_store(i);
+        }
+    }
+}
+
+/* Handles requests from the web page and repository changes while the store is open. */
+static void poll_store(void)
+{
+    char id[32];
+    if (web_ui_take_install_request(id)) {
+        const store_list_t *list = store_list();
+        for (int i = 0; i < list->count; ++i) {
+            if (strcmp(list->apps[i].id, id) == 0) {
+                install_from_store(i);
+                break;
+            }
+        }
+    }
+    if (store_repos_changed()) {
+        store_reload();
+    }
+}
+
 /* ---------- Input ---------- */
 
 static void select_item(int index)
 {
-    int total = s_ui.count + 2;
+    int rows = list_len();
+    int total = rows + footer_count();
     s_ui.selected = (index % total + total) % total;
-    if (s_ui.selected < s_ui.count) {
+    if (s_ui.selected < rows) {
         if (s_ui.selected < s_ui.scroll) s_ui.scroll = s_ui.selected;
         if (s_ui.selected >= s_ui.scroll + VISIBLE_ROWS) s_ui.scroll = s_ui.selected - VISIBLE_ROWS + 1;
     }
@@ -535,11 +780,15 @@ static void select_item(int index)
 
 static void activate_selected(void)
 {
+    if (s_ui.store_mode) {
+        activate_store_item();
+        return;
+    }
     if (s_ui.selected == s_ui.count) {
         bool keep = !s_ui.keep_app;
         if (cyd_platform_set_keep_app_on_power_on(keep) == ESP_OK) {
             s_ui.keep_app = keep;
-            set_status("SETTING SAVED", CYD_GREEN);
+            set_status(keep ? "POWER-ON STARTS THE LAST APP" : "POWER-ON STARTS THE LAUNCHER", CYD_GREEN);
         } else {
             set_status("COULD NOT SAVE SETTING", CYD_RED);
         }
@@ -550,6 +799,10 @@ static void activate_selected(void)
         update_launcher();
         return;
     }
+    if (s_ui.selected == s_ui.count + 2) {
+        open_store();
+        return;
+    }
     if (s_ui.selected >= 0 && s_ui.selected < s_ui.count) {
         launch_app(&s_ui.apps[s_ui.selected]);
     }
@@ -558,12 +811,18 @@ static void activate_selected(void)
 /* Returns the item index under a touch point, or -1. */
 static int item_at(int x, int y)
 {
+    int rows = list_len();
     if (y >= FOOTER_TOP && y < FOOTER_TOP + FOOTER_HEIGHT) {
-        return x < FOOTER_SPLIT ? s_ui.count : s_ui.count + 1;
+        for (int i = 0; i < footer_count(); ++i) {
+            int bx, bw;
+            footer_rect(i, &bx, &bw);
+            if (x >= bx && x < bx + bw) return rows + i;
+        }
+        return -1;
     }
     if (y >= LIST_TOP && y < LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT) {
         int i = s_ui.scroll + (y - LIST_TOP) / ROW_HEIGHT;
-        if (i < s_ui.count) return i;
+        if (i < rows) return i;
     }
     return -1;
 }
@@ -604,6 +863,7 @@ void app_main(void)
                        &s_version_is_release);
     ESP_LOGI(TAG, "Launcher %s (%s)", s_version, esp_app_get_description()->version);
 
+    store_init();
     s_ui.progress = -1;
     s_ui.keep_app = cyd_platform_get_keep_app_on_power_on();
     refresh_apps();
@@ -649,8 +909,12 @@ void app_main(void)
             }
         }
 
+        if (s_ui.store_mode) {
+            poll_store();
+        }
+
         /* Pick up a card inserted after boot. */
-        if (!s_ui.sd_ok && now - last_sd_retry > 2000000) {
+        if (!s_ui.store_mode && !s_ui.sd_ok && now - last_sd_retry > 2000000) {
             last_sd_retry = now;
             refresh_apps();
             if (s_ui.sd_ok) redraw();

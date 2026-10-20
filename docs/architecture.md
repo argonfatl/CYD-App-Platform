@@ -6,6 +6,7 @@ The runtime decision is recorded in [ADR 0002](adr/0002-firmware-slot-runtime.md
 
 - **Bootloader hook** (`firmware/launcher/bootloader_components/cyd_boot_hooks`) — on power-on or RST, erases `otadata` so the launcher starts, unless the user enabled "power-on starts last app".
 - **Launcher** (`firmware/launcher`) — lists apps on the SD card, verifies and installs the selected app into `ota_0`, and boots it. Also holds platform settings and updates itself from GitHub releases over Wi-Fi ([ADR 0003](adr/0003-launcher-self-update.md)).
+- **App store** (`firmware/launcher/main/app_store.c`, `web_ui.c`) — the GET APPS screen and its web page: reads the official catalog and user-added GitHub repositories, downloads apps to the SD card ([ADR 0004](adr/0004-app-catalog.md)).
 - **Board support** (`components/cyd_board`) — ILI9341 display drawn in 20-row stripes with two small DMA buffers, bit-banged XPT2046 touch, SD card on SPI3, BOOT button.
 - **Platform API** (`components/cyd_platform`, `sdk/arduino`) — return to the launcher, read or change the power-on policy, and read the touch calibration.
 - **Touch Setup** (`apps/touch-calibration`) — a system app that calibrates the touch screen and saves the result for all apps. Calibration lives outside the launcher so the launcher stays small and the procedure can be updated like any app.
@@ -40,7 +41,7 @@ new launcher (ota_0) ── copy itself ──► factory ── verify ──�
 
 The `cydcfg` partition holds the power-on policy (read by the bootloader hook) and the touch calibration, an affine map from raw XPT2046 readings to screen pixels (read by `cyd_touch_init()`).
 
-The launcher records which app is in the slot (id, SHA-256, and slot address) in NVS namespace `cyd_launcher`, and Wi-Fi credentials imported from `/wifi.json` in namespace `cyd_wifi`. Apps share the `nvs` partition and must use their own namespace. A per-app data directory on the SD card (`/apps/<app-id>/data/`) is the planned convention for larger app data.
+The launcher records which app is in the slot (id, SHA-256, and slot address) in NVS namespace `cyd_launcher`, Wi-Fi credentials imported from `/wifi.json` in namespace `cyd_wifi`, and user-added GitHub repositories in namespace `cyd_store`. Apps downloaded from GET APPS get a `source` field in their manifest (`official` or `github:owner/name`). Apps share the `nvs` partition and must use their own namespace. A per-app data directory on the SD card (`/apps/<app-id>/data/`) is the planned convention for larger app data.
 
 ## App sources and trust
 

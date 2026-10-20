@@ -22,6 +22,12 @@ The launcher works with touch or with the **BOOT** button alone: short press mov
 
 If touches land in the wrong place, open the **Touch Setup** app from the launcher. It calibrates the screen once for the launcher and all apps. See [apps/touch-calibration](apps/touch-calibration/README.md).
 
+## Getting apps over Wi-Fi
+
+Select **GET APPS** at the bottom of the launcher (Wi-Fi from `wifi.json` is required). It lists the apps from the official catalog and from any GitHub repositories you added, marked **NEW**, **UPDATE x.y.z**, or **INSTALLED**. Open one to download it to the SD card; it then appears in the main list.
+
+While GET APPS is open, the screen shows a web address such as `192.168.1.50`. Open it in a browser on the same network to add or remove GitHub repositories and to start downloads from your phone or computer. Apps from your own repositories are marked **GITHUB** / **unreviewed**: they run with full access to the device. [docs/app-publishing.md](docs/app-publishing.md) explains how to publish an app so the launcher can find it.
+
 ## Updating the launcher over Wi-Fi
 
 1. Put a `wifi.json` file in the root of the SD card:
@@ -48,7 +54,7 @@ To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/de
 
 ## Making a release
 
-Open **Actions → Release → Run workflow**, pick which part of the version to increase (`patch`, `minor`, or `major`), and run it. The workflow tags the current `main` (for example `v0.2.0` → `v0.3.0`), builds the firmware with that version, checks that the built launcher reports it, and publishes a release with `cyd-launcher-full.bin` (USB flashing), `cyd-launcher.bin` and `cyd-launcher.json` (Wi-Fi self-update), `cyd-sd-card.zip`, and `SHA256SUMS`. You can also enter an exact version instead.
+Open **Actions → Release → Run workflow**, pick which part of the version to increase (`patch`, `minor`, or `major`), and run it. The workflow tags the current `main` (for example `v0.2.0` → `v0.3.0`), builds the firmware with that version, checks that the built launcher reports it, and publishes a release with `cyd-launcher-full.bin` (USB flashing), `cyd-launcher.bin` and `cyd-launcher.json` (Wi-Fi self-update), `catalog.json` and `app-<id>.bin` (GET APPS), `cyd-sd-card.zip`, and `SHA256SUMS`. You can also enter an exact version instead.
 
 From a terminal: `gh workflow run release.yml -f bump=minor`.
 
@@ -91,7 +97,7 @@ Add a `manifest.json` next to `app.bin`:
 2. ~~Launcher self-update from GitHub releases over Wi-Fi.~~ Done; awaiting hardware test.
 3. Run [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) from the app slot.
 4. Wi-Fi setup screen and a shared settings store.
-5. Install and update apps from GitHub releases, with a trusted catalog of reviewed apps.
+5. ~~Install and update apps from GitHub releases, with a trusted catalog of reviewed apps.~~ Done; awaiting hardware test.
 6. Optional lightweight runtime (scripts or WebAssembly) for small apps that should switch instantly.
 
 ## App trust and security
