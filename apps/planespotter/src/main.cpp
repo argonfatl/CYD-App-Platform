@@ -26,7 +26,12 @@
 #include <LittleFS.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#if __has_include(<cydqr.h>)
 #include <cydqr.h>
+#define CYD_HAS_QR_ENCODER 1
+#else
+#define CYD_HAS_QR_ENCODER 0
+#endif
 #include <math.h>
 #include <algorithm>
 #include <time.h>
@@ -2996,6 +3001,7 @@ void ledUpdate() {
 // as large as fits in maxPx, with its right edge at rightX.
 // Returns the size drawn in pixels (0 on failure).
 int drawQrCode(const char* text, int rightX, int y, int maxPx) {
+#if CYD_HAS_QR_ENCODER
   const int MAXVER = 6;   // up to ~100 characters at ECC level M
   uint8_t qr[cydqr_BUFFER_LEN_FOR_VERSION(MAXVER)];
   uint8_t tmp[cydqr_BUFFER_LEN_FOR_VERSION(MAXVER)];
@@ -3015,6 +3021,13 @@ int drawQrCode(const char* text, int rightX, int y, int maxPx) {
       if (cydqr_getModule(qr, mx, my))
         tft.fillRect(x + (mx + border) * scale, y + (my + border) * scale, scale, scale, TFT_BLACK);
   return px;
+#else
+  (void)text;
+  (void)rightX;
+  (void)y;
+  (void)maxPx;
+  return 0;  // QR encoder is optional; the portal remains usable without it.
+#endif
 }
 
 // WiFi QR payload: WIFI:T:nopass;S:<ssid>;;  with \ ; , : " escaped in the SSID
