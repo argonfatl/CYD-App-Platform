@@ -21,6 +21,8 @@
 #include "web_ui.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "driver/adc.h"
+#include "esp_adc_cal.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -77,6 +79,90 @@ static void refresh_apps(void);
 static char s_version[24];        /* short launcher version shown in the header */
 static bool s_version_is_release; /* built exactly from a vX.Y.Z tag */
 static uint8_t s_chunk[COPY_CHUNK];
+
+/* ELEGOO ESP32-32E battery monitor: battery divider is routed to GPIO34. */
+#define BATTERY_ADC_CHANNEL ADC1_CHANNEL_6 /* GPIO34 */
+#define BATTERY_DIVIDER_RATIO 2.0f
+static esp_adc_cal_characteristics_t s_battery_adc_chars;
+static bool s_battery_adc_ready;
+static float s_battery_voltage;
+static int s_battery_percent = -1;
+
+static void battery_init(void)
+{
+    if (adc1_config_width(ADC_WIDTH_BIT_12) != ESP_OK ||
+        adc1_config_channel_atten(BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_11) != ESP_OK) {
+        ESP_LOGW(TAG, "Battery ADC setup failed");
+        return;
+    }
+    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12,
+                             1100, &s_battery_adc_chars);
+    s_battery_adc_ready = true;
+}
+
+static void battery_update(void)
+{
+    if (!s_battery_adc_ready) return;
+    uint32_t total_mv = 0;
+    for (int i = 0; i < 8; ++i) {
+        int raw = adc1_get_raw(BATTERY_ADC_CHANNEL);
+        if (raw < 0) return;
+        total_mv += esp_adc_cal_raw_to_voltage((uint32_t)raw, &s_battery_adc_chars);
+    }
+    float voltage = ((float)total_mv / 8.0f) * BATTERY_DIVIDER_RATIO / 1000.0f;
+    /* Reject disconnected or implausible readings rather than showing a false percentage. */
+    if (voltage < 2.5f || voltage > 4.5f) {
+        s_battery_voltage = 0.0f;
+        s_battery_percent = -1;
+        return;
+    }
+    s_battery_voltage = voltage;
+
+    /* Approximate rested Li-ion cell curve; actual percentage varies under load. */
+    static const struct { float volts; int percent; } curve[] = {
+        {3.30f, 0}, {3.50f, 5}, {3.60f, 10}, {3.70f, 20},
+        {3.75f, 30}, {3.80f, 40}, {3.85f, 50}, {3.90f, 60},
+        {3.95f, 70}, {4.00f, 80}, {4.10f, 90}, {4.20f, 100}
+    };
+    if (voltage <= curve[0].volts) {
+        s_battery_percent = 0;
+    } else {
+        s_battery_percent = 100;
+        for (size_t i = 1; i < sizeof(curve) / sizeof(curve[0]); ++i) {
+            if (voltage <= curve[i].volts) {
+                float fraction = (voltage - curve[i - 1].volts) /
+                                 (curve[i].volts - curve[i - 1].volts);
+                s_battery_percent = curve[i - 1].percent +
+                    (int)((curve[i].percent - curve[i - 1].percent) * fraction + 0.5f);
+                break;
+            }
+        }
+    }
+}
+
+static void draw_battery(cyd_canvas_t *c)
+{
+    const int x = CYD_LCD_H_RES - 47;
+    const int y = 9;
+    if (s_battery_percent < 0) {
+        cyd_draw_text(c, "BAT --", CYD_LCD_H_RES - 48, 10, 1, CYD_GREY);
+        return;
+    }
+    uint16_t color = s_battery_percent <= 15 ? CYD_RED :
+                     (s_battery_percent <= 30 ? CYD_AMBER : CYD_GREEN);
+    /* Battery outline and terminal, drawn using the platform's rectangle primitive. */
+    cyd_fill_rect(c, x, y, 20, 2, color);
+    cyd_fill_rect(c, x, y + 11, 20, 2, color);
+    cyd_fill_rect(c, x, y, 2, 13, color);
+    cyd_fill_rect(c, x + 18, y, 2, 13, color);
+    cyd_fill_rect(c, x + 20, y + 4, 3, 5, color);
+    int fill = 16 * s_battery_percent / 100;
+    if (fill > 0) cyd_fill_rect(c, x + 2, y + 2, fill, 9, color);
+    char label[5];
+    snprintf(label, sizeof(label), "%d%%", s_battery_percent);
+    cyd_draw_text(c, label, CYD_LCD_H_RES - 24, 10, 1, color);
+}
+
 
 /* ---------- Version label ---------- */
 
@@ -395,9 +481,11 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
         }
     } else {
         cyd_draw_text(c, "CYD APPS", 10, 9, 2, CYD_WHITE);
-        /* Launcher version: cyan for a release build, amber for a development build. */
-        cyd_draw_text(c, s_version, CYD_LCD_H_RES - 10 - cyd_text_width(s_version, 2), 9, 2,
+        /* Compact version label leaves room for the battery indicator. */
+        int version_x = CYD_LCD_H_RES - 53 - cyd_text_width(s_version, 1);
+        cyd_draw_text(c, s_version, version_x, 11, 1,
                       s_version_is_release ? CYD_CYAN : CYD_AMBER);
+        draw_battery(c);
     }
 
     if (s_ui.progress >= 0) {
@@ -892,6 +980,8 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     ESP_ERROR_CHECK(cyd_display_init());
+    battery_init();
+    battery_update();
     ESP_ERROR_CHECK(cyd_touch_init());
     ESP_ERROR_CHECK(cyd_button_init());
 
@@ -913,9 +1003,16 @@ void app_main(void)
     bool button_down = false;
     int64_t button_since = 0;
     int64_t last_sd_retry = esp_timer_get_time();
+    int64_t last_battery_update = esp_timer_get_time();
 
     for (;;) {
         int64_t now = esp_timer_get_time();
+        if (now - last_battery_update >= 2000000) {
+            last_battery_update = now;
+            int previous_percent = s_battery_percent;
+            battery_update();
+            if (previous_percent != s_battery_percent) redraw();
+        }
 
         /* Touch: tap selects a row; tapping the selected row opens it. */
         int tx, ty;
