@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "app_store.h"
+#include "cyd_platform.h"
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
@@ -39,12 +40,31 @@ static const char PAGE[] =
 "<h2>GitHub repositories</h2><div class=muted>Apps from these repositories are not reviewed. They run with full "
 "access to the device. Each repository needs a release with <code>cyd-app.json</code> and the app binary.</div>"
 "<div id=repos></div><form id=add><input id=repo placeholder='owner/name or https://github.com/owner/name' required>"
-"<button>Add</button></form><div id=msg></div></main><script>"
+"<button>Add</button></form>"
+"<h2>Location</h2><div class=muted>Shared with apps that need it, such as Satellites. "
+"Search for your town, or enter coordinates.</div><div class=card><div id=loc>Not set</div></div>"
+"<form id=find><input id=q placeholder='Town or city' required><button>Search</button></form><div id=found></div>"
+"<form id=manual style='margin-top:8px'><input id=lat placeholder='Latitude, e.g. 41.88' required>"
+"<input id=lon placeholder='Longitude, e.g. -88.01' required><button>Save</button></form>"
+"<div id=msg></div></main><script>"
 "const $=s=>document.querySelector(s);"
 "function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e}"
 "async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.statusText);return j}"
 "function msg(t,e){$('#msg').textContent=t;$('#msg').className=e?'err':''}"
+"async function saveLoc(lat,lon,name,alt){try{await post('/api/location',{lat:lat,lon:lon,name:name,alt_m:Math.round(alt||0),"
+"utc_offset_min:-new Date().getTimezoneOffset()});msg('Location saved: '+name);$('#found').textContent='';load()}"
+"catch(e){msg(e.message,1)}}"
+"$('#find').onsubmit=async e=>{e.preventDefault();const f=$('#found');f.textContent='Searching...';try{"
+"const r=await (await fetch('https://geocoding-api.open-meteo.com/v1/search?count=6&name='+encodeURIComponent($('#q').value))).json();"
+"f.textContent='';if(!r.results||!r.results.length){f.textContent='Nothing found';return}"
+"for(const p of r.results){const c=el('div','card'),d=el('div');d.append(el('div','name',p.name));"
+"d.append(el('div','muted',[p.admin1,p.country].filter(Boolean).join(', ')+' \u00b7 '+p.latitude.toFixed(3)+', '+p.longitude.toFixed(3)));"
+"const b=el('button','','Use');b.onclick=()=>saveLoc(p.latitude,p.longitude,p.name,p.elevation);c.append(d,b);f.append(c)}}"
+"catch(err){f.textContent='Search needs internet access in this browser'}};"
+"$('#manual').onsubmit=e=>{e.preventDefault();const la=parseFloat($('#lat').value),lo=parseFloat($('#lon').value);"
+"if(isNaN(la)||isNaN(lo)||Math.abs(la)>90||Math.abs(lo)>180){msg('Latitude -90..90, longitude -180..180',1);return}"
+"saveLoc(la,lo,la.toFixed(2)+', '+lo.toFixed(2),0)};"
 "async function load(){try{const s=await (await fetch('/api/state')).json();"
 "$('#info').textContent='Launcher '+s.launcher+(s.error?' \\u2014 last problem: '+s.error:'');"
 "$('#activity').textContent=s.activity||'';"
@@ -55,6 +75,7 @@ static const char PAGE[] =
 "const st={new:'Download',update:'Update to '+p.version,installed:'Installed'}[p.state];const b=el('button','',st);"
 "b.disabled=p.state==='installed';b.onclick=async()=>{try{await post('/api/install',{id:p.id});"
 "msg('Downloading '+p.name+' on the device...')}catch(e){msg(e.message,1)}};c.append(b);a.append(c)}"
+"$('#loc').textContent=s.location?s.location.name+' \u00b7 '+s.location.lat.toFixed(4)+', '+s.location.lon.toFixed(4):'Not set';"
 "const r=$('#repos');r.textContent='';for(const x of s.repos){const c=el('div','card'),d=el('div','',x);"
 "const b=el('button','rm','Remove');b.onclick=async()=>{try{await post('/api/repos/remove',{repo:x});msg('Removed '+x);load()}"
 "catch(e){msg(e.message,1)}};c.append(d,b);r.append(c)}}catch(e){$('#info').textContent='Device not reachable'}}"
@@ -120,6 +141,15 @@ static esp_err_t handle_state(httpd_req_t *req)
     int count = store_get_repos(repos, STORE_MAX_REPOS);
     cJSON *arr = cJSON_AddArrayToObject(root, "repos");
     for (int i = 0; i < count; ++i) cJSON_AddItemToArray(arr, cJSON_CreateString(repos[i]));
+
+    cyd_location_t loc;
+    if (cyd_platform_get_location(&loc)) {
+        cJSON *l = cJSON_AddObjectToObject(root, "location");
+        cJSON_AddNumberToObject(l, "lat", loc.lat_deg);
+        cJSON_AddNumberToObject(l, "lon", loc.lon_deg);
+        cJSON_AddNumberToObject(l, "alt_m", loc.alt_m);
+        cJSON_AddStringToObject(l, "name", loc.name);
+    }
     return send_json(req, root, "200 OK");
 }
 
@@ -167,6 +197,30 @@ static esp_err_t handle_remove_repo(httpd_req_t *req)
     return send_json(req, cJSON_CreateObject(), "200 OK");
 }
 
+static esp_err_t handle_location(httpd_req_t *req)
+{
+    cJSON *body = read_body(req);
+    const cJSON *lat = cJSON_GetObjectItemCaseSensitive(body, "lat");
+    const cJSON *lon = cJSON_GetObjectItemCaseSensitive(body, "lon");
+    const cJSON *alt = cJSON_GetObjectItemCaseSensitive(body, "alt_m");
+    const cJSON *off = cJSON_GetObjectItemCaseSensitive(body, "utc_offset_min");
+    const char *name = body_string(body, "name");
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (cJSON_IsNumber(lat) && cJSON_IsNumber(lon)) {
+        cyd_location_t loc = {0};
+        loc.lat_deg = lat->valuedouble;
+        loc.lon_deg = lon->valuedouble;
+        loc.alt_m = cJSON_IsNumber(alt) ? (int)alt->valuedouble : 0;
+        loc.utc_offset_min = cJSON_IsNumber(off) ? (int)off->valuedouble : 0;
+        snprintf(loc.name, sizeof(loc.name), "%s", name ? name : "");
+        err = cyd_platform_set_location(&loc);
+    }
+    cJSON_Delete(body);
+    if (err == ESP_ERR_INVALID_ARG) return send_error(req, "400 Bad Request", "Latitude -90..90, longitude -180..180");
+    if (err != ESP_OK) return send_error(req, "500 Internal Server Error", "Could not save the location");
+    return send_json(req, cJSON_CreateObject(), "200 OK");
+}
+
 static esp_err_t handle_install(httpd_req_t *req)
 {
     cJSON *body = read_body(req);
@@ -189,7 +243,7 @@ esp_err_t web_ui_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 6;
+    cfg.max_uri_handlers = 8;
     cfg.lru_purge_enable = true;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
@@ -202,6 +256,7 @@ esp_err_t web_ui_start(void)
         {.uri = "/api/repos", .method = HTTP_POST, .handler = handle_add_repo},
         {.uri = "/api/repos/remove", .method = HTTP_POST, .handler = handle_remove_repo},
         {.uri = "/api/install", .method = HTTP_POST, .handler = handle_install},
+        {.uri = "/api/location", .method = HTTP_POST, .handler = handle_location},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
         httpd_register_uri_handler(s_server, &routes[i]);

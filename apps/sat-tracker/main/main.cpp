@@ -255,29 +255,76 @@ static bool config_has_offset(void)
     return strstr(text, "utc_offset_min") != NULL;
 }
 
-/* Approximate location and current UTC offset from the public IP address. */
+/*
+ * Approximate location and current UTC offset from the public IP address. The device's
+ * own address is private (192.168.x.x), but these services see the router's public
+ * address. Several providers are tried because some networks block one or another.
+ */
+static char s_locate_error[40];
+
+static bool apply_ip_result(double lat, double lon, const char *city, bool have_offset, int offset_s)
+{
+    if (!s_cfg.have_location) {
+        s_cfg.obs.lat_deg = lat;
+        s_cfg.obs.lon_deg = lon;
+        s_cfg.obs.alt_m = 0;
+        s_cfg.have_location = true;
+        snprintf(s_cfg.place, sizeof(s_cfg.place), "%s", city ? city : "");
+    }
+    if (have_offset && !config_has_offset()) s_cfg.utc_offset_s = offset_s;
+    return true;
+}
+
 static bool locate_by_ip(void)
 {
-    char *body = NULL;
-    if (net_get("http://ip-api.com/json/?fields=status,lat,lon,city,offset", 2048, &body, NULL) != ESP_OK) {
-        return false;
-    }
-    cJSON *root = cJSON_Parse(body);
-    free(body);
-    const cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
-    bool ok = cJSON_IsString(status) && strcmp(status->valuestring, "success") == 0;
-    if (ok) {
-        if (!s_cfg.have_location) {
-            s_cfg.obs.lat_deg = json_num(root, "lat", 0);
-            s_cfg.obs.lon_deg = json_num(root, "lon", 0);
-            s_cfg.obs.alt_m = 0;
-            s_cfg.have_location = true;
-            json_str(root, "city", s_cfg.place, sizeof(s_cfg.place));
+    static const char *urls[] = {
+        "https://ipwho.is/?fields=success,latitude,longitude,city,timezone",
+        "https://ipapi.co/json/",
+        "http://ip-api.com/json/?fields=status,lat,lon,city,offset",
+    };
+    for (size_t i = 0; i < sizeof(urls) / sizeof(urls[0]); ++i) {
+        char *body = NULL;
+        esp_err_t err = net_get(urls[i], 4096, &body, NULL);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "%s: %s", urls[i], esp_err_to_name(err));
+            snprintf(s_locate_error, sizeof(s_locate_error), "%s", esp_err_to_name(err));
+            continue;
         }
-        if (!config_has_offset()) s_cfg.utc_offset_s = (int)json_num(root, "offset", 0);
+        cJSON *root = cJSON_Parse(body);
+        free(body);
+        bool ok = false;
+        char city[24] = "";
+        json_str(root, "city", city, sizeof(city));
+        if (i == 0) {
+            const cJSON *success = cJSON_GetObjectItemCaseSensitive(root, "success");
+            const cJSON *tz = cJSON_GetObjectItemCaseSensitive(root, "timezone");
+            const cJSON *off = cJSON_GetObjectItemCaseSensitive(tz, "offset");
+            if (cJSON_IsTrue(success)) {
+                ok = apply_ip_result(json_num(root, "latitude", 0), json_num(root, "longitude", 0), city,
+                                     cJSON_IsNumber(off), cJSON_IsNumber(off) ? (int)off->valuedouble : 0);
+            }
+        } else if (i == 1) {
+            double lat = json_num(root, "latitude", NAN), lon = json_num(root, "longitude", NAN);
+            char off[8] = "";
+            json_str(root, "utc_offset", off, sizeof(off)); /* "-0500" */
+            int hhmm = atoi(off + (off[0] == '+' || off[0] == '-'));
+            int secs = (hhmm / 100 * 60 + hhmm % 100) * 60 * (off[0] == '-' ? -1 : 1);
+            if (!isnan(lat) && !isnan(lon)) ok = apply_ip_result(lat, lon, city, off[0] != '\0', secs);
+        } else {
+            const cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
+            if (cJSON_IsString(status) && strcmp(status->valuestring, "success") == 0) {
+                ok = apply_ip_result(json_num(root, "lat", 0), json_num(root, "lon", 0), city, true,
+                                     (int)json_num(root, "offset", 0));
+            }
+        }
+        cJSON_Delete(root);
+        if (ok) {
+            ESP_LOGI(TAG, "IP location from %s", urls[i]);
+            return true;
+        }
+        snprintf(s_locate_error, sizeof(s_locate_error), "UNEXPECTED REPLY");
     }
-    cJSON_Delete(root);
-    return ok;
+    return false;
 }
 
 static void save_location(void)
@@ -792,12 +839,38 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "Clock from %s", clock_source);
 
-    show_status("LOCATING", s_cfg.have_location ? "FROM CONFIG.JSON" : "FROM YOUR IP ADDRESS", NULL, CYD_CYAN);
-    if (locate_by_ip()) save_location();
-    else if (!s_cfg.have_location) load_saved_location();
-    if (!s_cfg.have_location) {
-        fatal("NO LOCATION", "ADD LAT/LON TO", "/APPS/SAT-TRACKER/CONFIG.JSON");
+    /*
+     * Location, in order: config.json on the SD card, the location saved in the
+     * launcher (GET APPS web page), an IP lookup, the last location this app used.
+     */
+    const char *source = "CONFIG.JSON";
+    bool have_offset = config_has_offset();
+    cyd_location_t shared;
+    if (!s_cfg.have_location && cyd_platform_get_location(&shared)) {
+        s_cfg.obs.lat_deg = shared.lat_deg;
+        s_cfg.obs.lon_deg = shared.lon_deg;
+        s_cfg.obs.alt_m = shared.alt_m;
+        snprintf(s_cfg.place, sizeof(s_cfg.place), "%.23s", shared.name);
+        s_cfg.have_location = true;
+        source = "LAUNCHER";
+        if (!have_offset) s_cfg.utc_offset_s = shared.utc_offset_min * 60;
     }
+    if (!s_cfg.have_location || !have_offset) {
+        /* Also refreshes the UTC offset (daylight saving time) when only that is missing. */
+        show_status("LOCATING", s_cfg.have_location ? "UTC OFFSET FROM YOUR IP" : "FROM YOUR IP ADDRESS", NULL, CYD_CYAN);
+        bool had_location = s_cfg.have_location;
+        if (locate_by_ip()) {
+            if (!had_location) source = "IP ADDRESS";
+            save_location();
+        } else if (!s_cfg.have_location && load_saved_location()) {
+            source = "LAST RUN";
+        }
+    }
+    if (!s_cfg.have_location) {
+        ESP_LOGE(TAG, "IP lookup failed: %s", s_locate_error);
+        fatal("NO LOCATION", "SET IT IN THE LAUNCHER: GET APPS,", "THEN THE WEB PAGE SHOWN ON SCREEN");
+    }
+    ESP_LOGI(TAG, "Location from %s", source);
     ESP_LOGI(TAG, "Observer %.4f, %.4f (%s), UTC offset %d s", s_cfg.obs.lat_deg, s_cfg.obs.lon_deg,
              s_cfg.place, s_cfg.utc_offset_s);
 

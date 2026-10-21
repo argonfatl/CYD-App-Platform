@@ -63,6 +63,7 @@ Then use `otatool.py switch_ota_partition --slot 0` from ESP-IDF, or open the ap
 - [ ] A newer release is offered and installs; the device returns to the launcher with the new version.
 - [ ] Power loss while "UPDATING LAUNCHER" is shown recovers on the next boot.
 - [ ] Battery indicator: the percentage roughly matches a multimeter reading on BAT+ (see the `Battery ... mV` log line), shows `BAT --` without a battery, and updates while discharging.
+- [ ] Web page: searching a town and pressing Use saves the location; Satellites then logs `Location from LAUNCHER`.
 - [ ] GET APPS lists the catalog with NEW / UPDATE / INSTALLED and downloads an app to the SD card.
 - [ ] The web page at the shown address loads, adds and removes a repository, and starts a download.
 - [ ] An app from a user repository shows the GITHUB badge in the main list and runs.

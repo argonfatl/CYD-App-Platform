@@ -28,7 +28,7 @@ If touches land in the wrong place, open the **Touch Setup** app from the launch
 
 Select **GET APPS** at the bottom of the launcher (Wi-Fi from `wifi.json` is required). It lists the apps from the official catalog and from any GitHub repositories you added, marked **NEW**, **UPDATE x.y.z**, or **INSTALLED**. Open one to download it to the SD card; it then appears in the main list.
 
-While GET APPS is open, the screen shows a web address such as `192.168.1.50`. Open it in a browser on the same network to add or remove GitHub repositories and to start downloads from your phone or computer. Apps from your own repositories are marked **GITHUB** / **unreviewed**: they run with full access to the device. [docs/app-publishing.md](docs/app-publishing.md) explains how to publish an app so the launcher can find it.
+While GET APPS is open, the screen shows a web address such as `192.168.1.50`. Open it in a browser on the same network to add or remove GitHub repositories, start downloads from your phone or computer, and set the device's **location** (search for a town or enter coordinates). The location is shared with apps that need it, such as Satellites. Apps from your own repositories are marked **GITHUB** / **unreviewed**: they run with full access to the device. [docs/app-publishing.md](docs/app-publishing.md) explains how to publish an app so the launcher can find it.
 
 ## Updating the launcher over Wi-Fi
 

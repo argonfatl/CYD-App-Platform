@@ -12,7 +12,7 @@ Shows which satellites are above your location right now and when the next passe
 
 1. Connects to the Wi-Fi network saved by the launcher (`wifi.json`), so there is nothing to set up in the app.
 2. Uses the clock the launcher set. If it is not set (for example right after power-on), tries NTP (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`) and then the `Date` header of a web server, for networks that block NTP.
-3. Gets the location from `config.json` (below) or, if there is none, approximately from the public IP address (ip-api.com). The last location is remembered.
+3. Gets the location, in this order: `config.json` on the SD card (below); the location saved in the launcher (open **GET APPS**, then the web page shown on the screen, *Location*); an approximate location from your public IP address (ipwho.is, ipapi.co, or ip-api.com; the device itself has a private address, but these services see your router's public one); the location from the last run.
 4. Downloads orbital elements (TLE) for the CelesTrak `visual` group, about 150 of the brightest satellites, and keeps a copy on the SD card. The copy is reused for 12 hours and whenever the download fails.
 5. Turns Wi-Fi off to free memory, then computes positions every second with SGP4.
 
@@ -32,7 +32,7 @@ Positions agree with [Skyfield](https://rhodesmill.org/skyfield/) to about 0.001
 }
 ```
 
-All fields are optional. Without `lat`/`lon` the IP location is used; without `utc_offset_min` the offset reported for your IP is used (it follows daylight saving time when the app starts). `group` is any [CelesTrak GP group](https://celestrak.org/NORAD/elements/) name, such as `stations`, `amateur`, or `weather`; at most 220 satellites are loaded.
+All fields are optional. Without `lat`/`lon` the launcher's location or the IP location is used; without `utc_offset_min` the offset reported for your IP is used (it follows daylight saving time when the app starts). `group` is any [CelesTrak GP group](https://celestrak.org/NORAD/elements/) name, such as `stations`, `amateur`, or `weather`; at most 220 satellites are loaded.
 
 ## Credits
 
