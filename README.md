@@ -69,6 +69,7 @@ Pushing a `v*` tag by hand still works and publishes a release the same way.
 - `components/cyd_platform/` — the small API apps use to return to the launcher.
 - `sdk/arduino/` — a single header for Arduino-ESP32 apps.
 - `apps/touch-calibration/` — Touch Setup, the system app that calibrates the touch screen.
+- `apps/sat-tracker/` — Satellites: sky map, list, and upcoming passes of satellites over your location (SGP4, CelesTrak data).
 - `apps/plane-spotter/` — Plane Spotter, an adapted copy of [CYD28PlaneSpotter](https://github.com/argonfatl/CYD28PlaneSpotter) built with PlatformIO.
 - `apps/examples/hello-app/` — a minimal example app.
 - `docs/` — architecture notes and decision records.

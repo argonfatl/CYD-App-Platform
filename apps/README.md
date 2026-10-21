@@ -3,6 +3,7 @@
 Apps are complete ESP32 firmware images that the launcher installs into the `ota_0` slot.
 
 - **touch-calibration** (Touch Setup) — calibrates the touch screen for all apps.
+- **sat-tracker** (Satellites) — satellites above your location and their next passes, computed on the device with SGP4.
 - **plane-spotter** — live aircraft overhead; an adapted copy of CYD28PlaneSpotter built with PlatformIO.
 - **examples/hello-app** — shows a counter and returns to the launcher on EXIT or a long BOOT press.
 

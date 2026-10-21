@@ -1,0 +1,846 @@
+/*
+ * Satellite Tracker for CYD App Platform.
+ *
+ * Downloads current orbital elements (TLE) from CelesTrak, works out where each
+ * satellite is from this device's location with SGP4, and shows:
+ *   SKY     a polar sky map of satellites above the horizon
+ *   LIST    satellites above the horizon, highest first
+ *   PASSES  upcoming passes, computed in the background
+ *
+ * Wi-Fi comes from the launcher's settings; the location from config.json on the
+ * SD card or, if absent, from an IP lookup. See README.md.
+ */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#include <algorithm>
+#include <vector>
+
+#include "cJSON.h"
+#include "cyd_board.h"
+#include "cyd_platform.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "net.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "sat_math.h"
+
+static const char *TAG = "sat_tracker";
+
+#define APP_DIR          CYD_SD_MOUNT_POINT "/apps/sat-tracker"
+#define CONFIG_PATH      APP_DIR "/config.json"
+#define NVS_NS           "sat_tracker"
+#define TLE_MAX_BYTES    (160 * 1024)
+#define TLE_MAX_AGE_S    (12 * 3600)  /* CelesTrak asks clients not to refetch more often than needed */
+#define MAX_SATS         220
+#define PASS_HORIZON_S   (12 * 3600)
+#define MAX_PASSES       40
+#define ISS_CATNUM       25544
+#define LONG_PRESS_US    700000
+
+/* ---------- Layout ---------- */
+
+#define HEADER_H   34
+#define FOOTER_Y   214
+#define FOOTER_H   24
+#define SKY_CX     118
+#define SKY_CY     124
+#define SKY_R      86
+#define PANEL_X    218
+#define ROW_Y0     40
+#define ROW_H      24
+#define ROWS       7
+
+enum screen_t { SCREEN_SKY, SCREEN_LIST, SCREEN_PASSES };
+
+/* ---------- State ---------- */
+
+struct config_t {
+    observer_t obs;
+    bool have_location;
+    char place[24];
+    int utc_offset_s;
+    double min_el;
+    char group[24];
+};
+
+struct entry_t {
+    satellite_t *sat;
+    look_t look;
+    bool valid;
+};
+
+static config_t s_cfg;
+static std::vector<entry_t> s_sats;
+static SemaphoreHandle_t s_sat_lock;   /* guards sgp4 state of each satellite */
+
+static SemaphoreHandle_t s_pass_lock;  /* guards s_passes */
+static std::vector<std::pair<int, pass_t>> s_passes; /* (satellite index, pass) */
+static volatile int s_pass_progress = -1; /* 0..100 while computing, -1 when idle */
+static volatile bool s_pass_ready;
+
+static screen_t s_screen = SCREEN_SKY;
+static int s_selected = -1;
+static int64_t s_exit_armed_until;
+static char s_message[64];
+
+/* ---------- Small drawing helpers ---------- */
+
+static void pixel(cyd_canvas_t *c, int x, int y, uint16_t color)
+{
+    cyd_fill_rect(c, x, y, 1, 1, color);
+}
+
+static void circle(cyd_canvas_t *c, int cx, int cy, int r, uint16_t color)
+{
+    if (cy + r < c->y0 || cy - r >= c->y0 + c->h) return;
+    int x = r, y = 0, err = 1 - r;
+    while (x >= y) {
+        pixel(c, cx + x, cy + y, color); pixel(c, cx - x, cy + y, color);
+        pixel(c, cx + x, cy - y, color); pixel(c, cx - x, cy - y, color);
+        pixel(c, cx + y, cy + x, color); pixel(c, cx - y, cy + x, color);
+        pixel(c, cx + y, cy - x, color); pixel(c, cx - y, cy - x, color);
+        ++y;
+        if (err < 0) err += 2 * y + 1;
+        else { --x; err += 2 * (y - x) + 1; }
+    }
+}
+
+static void text_clipped(cyd_canvas_t *c, const char *text, int x, int y, int scale, int max_w, uint16_t color)
+{
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%s", text);
+    while (buf[0] && cyd_text_width(buf, scale) > max_w) buf[strlen(buf) - 1] = '\0';
+    cyd_draw_text(c, buf, x, y, scale, color);
+}
+
+static void text_right(cyd_canvas_t *c, const char *text, int right, int y, int scale, uint16_t color)
+{
+    cyd_draw_text(c, text, right - cyd_text_width(text, scale), y, scale, color);
+}
+
+static void text_center(cyd_canvas_t *c, const char *text, int y, int scale, uint16_t color)
+{
+    cyd_draw_text(c, text, (CYD_LCD_H_RES - cyd_text_width(text, scale)) / 2, y, scale, color);
+}
+
+static const char *compass(double az)
+{
+    static const char *names[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    return names[(int)floor((az + 22.5) / 45.0) % 8];
+}
+
+static void local_hhmm(time_t utc, char *out, size_t len, bool seconds)
+{
+    time_t local = utc + s_cfg.utc_offset_s;
+    struct tm tm;
+    gmtime_r(&local, &tm);
+    if (seconds) snprintf(out, len, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+    else snprintf(out, len, "%02d:%02d", tm.tm_hour, tm.tm_min);
+}
+
+/* ---------- Status screen (startup and errors) ---------- */
+
+static struct {
+    const char *title;
+    char line1[48];
+    char line2[48];
+    uint16_t color;
+} s_status;
+
+static void draw_status(cyd_canvas_t *c, void *ctx)
+{
+    cyd_fill(c, CYD_DARK);
+    cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, HEADER_H - 2, CYD_PANEL);
+    cyd_fill_rect(c, 0, HEADER_H - 2, CYD_LCD_H_RES, 2, CYD_CYAN);
+    cyd_draw_text(c, "SATELLITES", 10, 9, 2, CYD_WHITE);
+    text_center(c, s_status.title, 92, 2, s_status.color);
+    text_center(c, s_status.line1, 124, 1, CYD_WHITE);
+    text_center(c, s_status.line2, 140, 1, CYD_GREY);
+    text_center(c, "HOLD BOOT TO EXIT", 210, 1, CYD_GREY);
+}
+
+static void show_status(const char *title, const char *line1, const char *line2, uint16_t color)
+{
+    s_status.title = title;
+    snprintf(s_status.line1, sizeof(s_status.line1), "%s", line1 ? line1 : "");
+    snprintf(s_status.line2, sizeof(s_status.line2), "%s", line2 ? line2 : "");
+    s_status.color = color;
+    cyd_display_render(draw_status, NULL);
+}
+
+/* Shows an error and waits until the user leaves for the launcher. */
+[[noreturn]] static void fatal(const char *title, const char *line1, const char *line2)
+{
+    ESP_LOGE(TAG, "%s: %s %s", title, line1 ? line1 : "", line2 ? line2 : "");
+    show_status(title, line1, line2, CYD_RED);
+    int64_t pressed_since = -1;
+    for (;;) {
+        int x, y;
+        if (cyd_touch_read(&x, &y) && y >= 200) cyd_platform_return_to_launcher();
+        if (cyd_button_pressed()) {
+            if (pressed_since < 0) pressed_since = esp_timer_get_time();
+            if (esp_timer_get_time() - pressed_since > LONG_PRESS_US) cyd_platform_return_to_launcher();
+        } else {
+            pressed_since = -1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
+/* ---------- Configuration and location ---------- */
+
+static double json_num(const cJSON *o, const char *key, double def)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    return cJSON_IsNumber(v) ? v->valuedouble : def;
+}
+
+static void json_str(const cJSON *o, const char *key, char *out, size_t len)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (cJSON_IsString(v) && v->valuestring) snprintf(out, len, "%s", v->valuestring);
+}
+
+static void load_config(void)
+{
+    s_cfg.min_el = 10;
+    s_cfg.utc_offset_s = 0;
+    snprintf(s_cfg.group, sizeof(s_cfg.group), "visual");
+
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (f == NULL) return;
+    char text[512];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    cJSON *root = cJSON_Parse(text);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "%s is not valid JSON", CONFIG_PATH);
+        return;
+    }
+    double lat = json_num(root, "lat", NAN), lon = json_num(root, "lon", NAN);
+    if (!isnan(lat) && !isnan(lon) && fabs(lat) <= 90 && fabs(lon) <= 180) {
+        s_cfg.obs.lat_deg = lat;
+        s_cfg.obs.lon_deg = lon;
+        s_cfg.obs.alt_m = json_num(root, "alt_m", 0);
+        s_cfg.have_location = true;
+        snprintf(s_cfg.place, sizeof(s_cfg.place), "%.2f %.2f", lat, lon);
+    }
+    json_str(root, "name", s_cfg.place, sizeof(s_cfg.place));
+    s_cfg.utc_offset_s = (int)(json_num(root, "utc_offset_min", 0) * 60);
+    s_cfg.min_el = json_num(root, "min_elevation", 10);
+    json_str(root, "group", s_cfg.group, sizeof(s_cfg.group));
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "Config: group %s, min elevation %.0f", s_cfg.group, s_cfg.min_el);
+}
+
+static bool config_has_offset(void)
+{
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (f == NULL) return false;
+    char text[512];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    return strstr(text, "utc_offset_min") != NULL;
+}
+
+/* Approximate location and current UTC offset from the public IP address. */
+static bool locate_by_ip(void)
+{
+    char *body = NULL;
+    if (net_get("http://ip-api.com/json/?fields=status,lat,lon,city,offset", 2048, &body, NULL) != ESP_OK) {
+        return false;
+    }
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    const cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
+    bool ok = cJSON_IsString(status) && strcmp(status->valuestring, "success") == 0;
+    if (ok) {
+        if (!s_cfg.have_location) {
+            s_cfg.obs.lat_deg = json_num(root, "lat", 0);
+            s_cfg.obs.lon_deg = json_num(root, "lon", 0);
+            s_cfg.obs.alt_m = 0;
+            s_cfg.have_location = true;
+            json_str(root, "city", s_cfg.place, sizeof(s_cfg.place));
+        }
+        if (!config_has_offset()) s_cfg.utc_offset_s = (int)json_num(root, "offset", 0);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+static void save_location(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_i32(h, "lat_u", (int32_t)llround(s_cfg.obs.lat_deg * 1e6));
+    nvs_set_i32(h, "lon_u", (int32_t)llround(s_cfg.obs.lon_deg * 1e6));
+    nvs_set_i32(h, "alt_m", (int32_t)s_cfg.obs.alt_m);
+    nvs_set_i32(h, "utc_off", s_cfg.utc_offset_s);
+    nvs_set_str(h, "place", s_cfg.place);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static bool load_saved_location(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    int32_t lat, lon, alt = 0, off = 0;
+    bool ok = nvs_get_i32(h, "lat_u", &lat) == ESP_OK && nvs_get_i32(h, "lon_u", &lon) == ESP_OK;
+    if (ok) {
+        nvs_get_i32(h, "alt_m", &alt);
+        nvs_get_i32(h, "utc_off", &off);
+        size_t len = sizeof(s_cfg.place);
+        if (nvs_get_str(h, "place", s_cfg.place, &len) != ESP_OK) s_cfg.place[0] = '\0';
+        s_cfg.obs.lat_deg = lat / 1e6;
+        s_cfg.obs.lon_deg = lon / 1e6;
+        s_cfg.obs.alt_m = alt;
+        if (!config_has_offset()) s_cfg.utc_offset_s = off;
+        s_cfg.have_location = true;
+    }
+    nvs_close(h);
+    return ok;
+}
+
+/* ---------- Orbital elements ---------- */
+
+static void tle_cache_path(char *out, size_t len)
+{
+    snprintf(out, len, APP_DIR "/%s.tle", s_cfg.group);
+}
+
+static int64_t tle_saved_at(void)
+{
+    nvs_handle_t h;
+    int64_t t = 0;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        char key[16];
+        snprintf(key, sizeof(key), "tle_%.10s", s_cfg.group);
+        nvs_get_i64(h, key, &t);
+        nvs_close(h);
+    }
+    return t;
+}
+
+static char *read_file(const char *path, size_t max)
+{
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return NULL;
+    char *buf = (char *)malloc(max + 1);
+    size_t n = buf ? fread(buf, 1, max, f) : 0;
+    fclose(f);
+    if (buf == NULL || n == 0) {
+        free(buf);
+        return NULL;
+    }
+    buf[n] = '\0';
+    return buf;
+}
+
+static void save_tle_cache(const char *text)
+{
+    char path[64];
+    tle_cache_path(path, sizeof(path));
+    mkdir(CYD_SD_MOUNT_POINT "/apps", 0775);
+    mkdir(APP_DIR, 0775);
+    FILE *f = fopen(path, "w");
+    if (f == NULL) return;
+    bool ok = fputs(text, f) >= 0;
+    fclose(f);
+    nvs_handle_t h;
+    if (ok && nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        char key[16];
+        snprintf(key, sizeof(key), "tle_%.10s", s_cfg.group);
+        nvs_set_i64(h, key, (int64_t)time(NULL));
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+/* Returns TLE text (heap) from the SD cache if fresh, else CelesTrak, else a stale cache. */
+static char *get_tles(bool *from_cache)
+{
+    char path[64];
+    tle_cache_path(path, sizeof(path));
+    int64_t age = (int64_t)time(NULL) - tle_saved_at();
+    if (age >= 0 && age < TLE_MAX_AGE_S) {
+        char *text = read_file(path, TLE_MAX_BYTES);
+        if (text) {
+            *from_cache = true;
+            ESP_LOGI(TAG, "Using cached TLEs (%lld min old)", (long long)(age / 60));
+            return text;
+        }
+    }
+
+    char url[128];
+    snprintf(url, sizeof(url), "https://celestrak.org/NORAD/elements/gp.php?GROUP=%s&FORMAT=tle", s_cfg.group);
+    char *text = NULL;
+    size_t len = 0;
+    esp_err_t err = net_get(url, TLE_MAX_BYTES, &text, &len);
+    if (err == ESP_OK && strstr(text, "\n1 ") != NULL) {
+        ESP_LOGI(TAG, "Downloaded %u bytes of TLEs", (unsigned)len);
+        save_tle_cache(text);
+        *from_cache = false;
+        return text;
+    }
+    ESP_LOGW(TAG, "TLE download failed (%s)", esp_err_to_name(err));
+    free(text);
+    *from_cache = true;
+    return read_file(path, TLE_MAX_BYTES);
+}
+
+static int parse_tles(char *text)
+{
+    std::vector<char *> lines;
+    for (char *save = NULL, *l = strtok_r(text, "\r\n", &save); l; l = strtok_r(NULL, "\r\n", &save)) {
+        lines.push_back(l);
+    }
+    for (size_t i = 0; i + 1 < lines.size() && s_sats.size() < MAX_SATS; ++i) {
+        if (lines[i][0] != '1' || lines[i + 1][0] != '2') continue;
+        const char *name = (i > 0 && lines[i - 1][0] != '1' && lines[i - 1][0] != '2') ? lines[i - 1] : NULL;
+        satellite_t *sat = (satellite_t *)malloc(sizeof(satellite_t));
+        if (sat == NULL) {
+            ESP_LOGW(TAG, "Out of memory after %u satellites", (unsigned)s_sats.size());
+            break;
+        }
+        if (sat_parse_tle(name, lines[i], lines[i + 1], sat)) {
+            entry_t e = {};
+            e.sat = sat;
+            s_sats.push_back(e);
+        } else {
+            free(sat);
+        }
+        ++i;
+    }
+    return (int)s_sats.size();
+}
+
+/* ---------- Positions ---------- */
+
+static void update_positions(void)
+{
+    time_t now = time(NULL);
+    double jd = sat_jd(now, 0);
+    for (auto &e : s_sats) {
+        xSemaphoreTake(s_sat_lock, portMAX_DELAY);
+        e.valid = sat_look(e.sat, &s_cfg.obs, jd, &e.look);
+        xSemaphoreGive(s_sat_lock);
+    }
+}
+
+/* Indices of satellites above the horizon, highest first. */
+static std::vector<int> visible_sorted(void)
+{
+    std::vector<int> v;
+    for (int i = 0; i < (int)s_sats.size(); ++i) {
+        if (s_sats[i].valid && s_sats[i].look.el_deg > 0) v.push_back(i);
+    }
+    std::sort(v.begin(), v.end(), [](int a, int b) { return s_sats[a].look.el_deg > s_sats[b].look.el_deg; });
+    return v;
+}
+
+/* ---------- Pass prediction (background task) ---------- */
+
+static void pass_task(void *arg)
+{
+    satellite_t *copy = (satellite_t *)malloc(sizeof(satellite_t));
+    for (;;) {
+        time_t from = time(NULL);
+        std::vector<std::pair<int, pass_t>> found;
+        int n = (int)s_sats.size();
+        for (int i = 0; i < n; ++i) {
+            s_pass_progress = i * 100 / n;
+            xSemaphoreTake(s_sat_lock, portMAX_DELAY);
+            memcpy(copy, s_sats[i].sat, sizeof(satellite_t));
+            xSemaphoreGive(s_sat_lock);
+
+            /* Up to three passes per satellite within the horizon. */
+            time_t t = from;
+            for (int k = 0; k < 3; ++k) {
+                pass_t p;
+                if (!sat_next_pass(copy, &s_cfg.obs, t, from + PASS_HORIZON_S, s_cfg.min_el, 60, &p)) break;
+                found.push_back({i, p});
+                t = p.set + 60;
+            }
+            vTaskDelay(1); /* let the UI task run */
+        }
+        std::sort(found.begin(), found.end(),
+                  [](const std::pair<int, pass_t> &a, const std::pair<int, pass_t> &b) { return a.second.rise < b.second.rise; });
+        if (found.size() > MAX_PASSES) found.resize(MAX_PASSES);
+
+        xSemaphoreTake(s_pass_lock, portMAX_DELAY);
+        s_passes = found;
+        xSemaphoreGive(s_pass_lock);
+        s_pass_ready = true;
+        s_pass_progress = -1;
+        ESP_LOGI(TAG, "%u passes in the next %d h (took %lld s)", (unsigned)found.size(), PASS_HORIZON_S / 3600,
+                 (long long)(time(NULL) - from));
+
+        /* Recompute when the earliest listed pass is over, or every 30 minutes. */
+        for (int waited = 0; waited < 1800; waited += 10) {
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            xSemaphoreTake(s_pass_lock, portMAX_DELAY);
+            bool stale = s_passes.empty() || s_passes.front().second.set < time(NULL);
+            xSemaphoreGive(s_pass_lock);
+            if (stale && waited >= 300) break;
+        }
+    }
+}
+
+/* ---------- Screens ---------- */
+
+static void sky_point(double az, double el, int *x, int *y)
+{
+    double d = SKY_R * (90.0 - el) / 90.0;
+    *x = SKY_CX + (int)lround(d * sin(az * M_PI / 180.0));
+    *y = SKY_CY - (int)lround(d * cos(az * M_PI / 180.0));
+}
+
+static uint16_t el_color(double el)
+{
+    return el >= 45 ? CYD_GREEN : (el >= 15 ? CYD_CYAN : CYD_GREY);
+}
+
+static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
+{
+    circle(c, SKY_CX, SKY_CY, SKY_R, CYD_GREY);
+    circle(c, SKY_CX, SKY_CY, SKY_R * 2 / 3, CYD_PANEL);
+    circle(c, SKY_CX, SKY_CY, SKY_R / 3, CYD_PANEL);
+    cyd_fill_rect(c, SKY_CX, SKY_CY - SKY_R, 1, 2 * SKY_R, CYD_PANEL);
+    cyd_fill_rect(c, SKY_CX - SKY_R, SKY_CY, 2 * SKY_R, 1, CYD_PANEL);
+    cyd_draw_text(c, "N", SKY_CX - 2, SKY_CY - SKY_R - 9, 1, CYD_WHITE);
+    cyd_draw_text(c, "S", SKY_CX - 2, SKY_CY + SKY_R + 3, 1, CYD_GREY);
+    cyd_draw_text(c, "E", SKY_CX + SKY_R + 4, SKY_CY - 3, 1, CYD_GREY);
+    cyd_draw_text(c, "W", SKY_CX - SKY_R - 9, SKY_CY - 3, 1, CYD_GREY);
+
+    for (int i : up) {
+        if (i == s_selected) continue;
+        int x, y;
+        sky_point(s_sats[i].look.az_deg, s_sats[i].look.el_deg, &x, &y);
+        bool iss = s_sats[i].sat->catnum == ISS_CATNUM;
+        int r = iss ? 3 : 1;
+        cyd_fill_rect(c, x - r, y - r, 2 * r + 1, 2 * r + 1, iss ? CYD_WHITE : el_color(s_sats[i].look.el_deg));
+    }
+    if (s_selected >= 0 && s_sats[s_selected].valid && s_sats[s_selected].look.el_deg > 0) {
+        int x, y;
+        sky_point(s_sats[s_selected].look.az_deg, s_sats[s_selected].look.el_deg, &x, &y);
+        cyd_fill_rect(c, x - 3, y - 3, 7, 7, CYD_AMBER);
+        circle(c, x, y, 6, CYD_AMBER);
+    }
+
+    /* Right panel: count and the selected satellite. */
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%d UP", (int)up.size());
+    cyd_draw_text(c, buf, PANEL_X, 42, 2, CYD_WHITE);
+    snprintf(buf, sizeof(buf), "OF %d", (int)s_sats.size());
+    cyd_draw_text(c, buf, PANEL_X, 62, 1, CYD_GREY);
+
+    if (s_selected < 0) return;
+    const entry_t &e = s_sats[s_selected];
+    int y = 82;
+    cyd_fill_rect(c, PANEL_X, y, CYD_LCD_H_RES - PANEL_X - 4, 1, CYD_PANEL);
+    y += 6;
+    text_clipped(c, e.sat->name, PANEL_X, y, 1, CYD_LCD_H_RES - PANEL_X - 4, CYD_AMBER);
+    y += 14;
+    if (!e.valid) {
+        cyd_draw_text(c, "NO POSITION", PANEL_X, y, 1, CYD_RED);
+        return;
+    }
+    if (e.look.el_deg > 0) {
+        snprintf(buf, sizeof(buf), "EL %.0f", e.look.el_deg);
+        cyd_draw_text(c, buf, PANEL_X, y, 2, CYD_GREEN);
+        y += 20;
+        snprintf(buf, sizeof(buf), "AZ %.0f %s", e.look.az_deg, compass(e.look.az_deg));
+        cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_WHITE);
+        y += 12;
+    } else {
+        cyd_draw_text(c, "BELOW HORIZON", PANEL_X, y, 1, CYD_GREY);
+        y += 12;
+        xSemaphoreTake(s_pass_lock, portMAX_DELAY);
+        for (auto &p : s_passes) {
+            if (p.first == s_selected) {
+                char t[8];
+                local_hhmm(p.second.rise, t, sizeof(t), false);
+                snprintf(buf, sizeof(buf), "NEXT %s", t);
+                cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_CYAN);
+                y += 12;
+                snprintf(buf, sizeof(buf), "MAX EL %.0f", p.second.max_el_deg);
+                cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_CYAN);
+                y += 12;
+                break;
+            }
+        }
+        xSemaphoreGive(s_pass_lock);
+    }
+    snprintf(buf, sizeof(buf), "RANGE %.0f KM", e.look.range_km);
+    cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_GREY);
+    y += 12;
+    snprintf(buf, sizeof(buf), "ALT %.0f KM", e.look.alt_km);
+    cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_GREY);
+}
+
+static void draw_list(cyd_canvas_t *c, const std::vector<int> &up)
+{
+    if (up.empty()) {
+        text_center(c, "NOTHING ABOVE THE HORIZON", 110, 1, CYD_GREY);
+        return;
+    }
+    for (int row = 0; row < ROWS && row < (int)up.size(); ++row) {
+        const entry_t &e = s_sats[up[row]];
+        int y = ROW_Y0 + row * ROW_H;
+        bool sel = up[row] == s_selected;
+        cyd_fill_rect(c, 4, y, CYD_LCD_H_RES - 8, ROW_H - 3, sel ? CYD_AMBER : CYD_PANEL);
+        uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
+        text_clipped(c, e.sat->name, 10, y + 4, 2, 170, fg);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "EL %2.0f %s", e.look.el_deg, compass(e.look.az_deg));
+        text_right(c, buf, CYD_LCD_H_RES - 10, y + 3, 1, sel ? CYD_BLACK : el_color(e.look.el_deg));
+        snprintf(buf, sizeof(buf), "%.0f KM", e.look.range_km);
+        text_right(c, buf, CYD_LCD_H_RES - 10, y + 12, 1, sel ? CYD_BLACK : CYD_GREY);
+    }
+}
+
+static void draw_passes(cyd_canvas_t *c)
+{
+    xSemaphoreTake(s_pass_lock, portMAX_DELAY);
+    std::vector<std::pair<int, pass_t>> passes = s_passes;
+    xSemaphoreGive(s_pass_lock);
+
+    time_t now = time(NULL);
+    passes.erase(std::remove_if(passes.begin(), passes.end(),
+                                [now](const std::pair<int, pass_t> &p) { return p.second.set < now; }),
+                 passes.end());
+
+    if (passes.empty()) {
+        char buf[40];
+        if (s_pass_progress >= 0) snprintf(buf, sizeof(buf), "COMPUTING PASSES %d%%", s_pass_progress);
+        else snprintf(buf, sizeof(buf), "NO PASSES ABOVE %.0f DEG", s_cfg.min_el);
+        text_center(c, buf, 110, 1, CYD_GREY);
+        return;
+    }
+    for (int row = 0; row < ROWS && row < (int)passes.size(); ++row) {
+        const pass_t &p = passes[row].second;
+        int idx = passes[row].first;
+        int y = ROW_Y0 + row * ROW_H;
+        bool now_up = p.rise <= now && now <= p.set;
+        bool sel = idx == s_selected;
+        cyd_fill_rect(c, 4, y, CYD_LCD_H_RES - 8, ROW_H - 3, sel ? CYD_AMBER : (now_up ? CYD_RGB(10, 60, 30) : CYD_PANEL));
+        uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
+        char t[8], buf[48];
+        local_hhmm(p.rise, t, sizeof(t), false);
+        cyd_draw_text(c, now_up ? "NOW" : t, 10, y + 4, 2, sel ? CYD_BLACK : (now_up ? CYD_GREEN : CYD_CYAN));
+        text_clipped(c, s_sats[idx].sat->name, 78, y + 3, 1, CYD_LCD_H_RES - 88, fg);
+        snprintf(buf, sizeof(buf), "MAX %.0f  %d MIN  %s>%s", p.max_el_deg, (int)((p.set - p.rise + 30) / 60),
+                 compass(p.rise_az_deg), compass(p.set_az_deg));
+        cyd_draw_text(c, buf, 78, y + 12, 1, sel ? CYD_BLACK : CYD_GREY);
+    }
+}
+
+static const char *FOOTER[] = {"SKY", "LIST", "PASSES", "EXIT"};
+
+static void footer_rect(int i, int *x, int *w)
+{
+    *w = (CYD_LCD_H_RES - 8 - 3 * 4) / 4;
+    *x = 4 + i * (*w + 4);
+}
+
+static void draw_screen(cyd_canvas_t *c, void *ctx)
+{
+    const std::vector<int> &up = *(const std::vector<int> *)ctx;
+    cyd_fill(c, CYD_DARK);
+
+    /* Header: screen title, local time, place. */
+    cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, HEADER_H - 2, CYD_PANEL);
+    cyd_fill_rect(c, 0, HEADER_H - 2, CYD_LCD_H_RES, 2, CYD_CYAN);
+    const char *titles[] = {"SKY", "OVERHEAD", "PASSES"};
+    cyd_draw_text(c, titles[s_screen], 10, 9, 2, CYD_WHITE);
+    char clock[12];
+    local_hhmm(time(NULL), clock, sizeof(clock), true);
+    text_right(c, clock, CYD_LCD_H_RES - 8, 6, 1, CYD_CYAN);
+    char place[24];
+    snprintf(place, sizeof(place), "%.20s", s_cfg.place);
+    text_right(c, place, CYD_LCD_H_RES - 8, 18, 1, CYD_GREY);
+
+    if (s_screen == SCREEN_SKY) draw_sky(c, up);
+    else if (s_screen == SCREEN_LIST) draw_list(c, up);
+    else draw_passes(c);
+
+    if (s_message[0]) text_center(c, s_message, FOOTER_Y - 11, 1, CYD_AMBER);
+
+    for (int i = 0; i < 4; ++i) {
+        int x, w;
+        footer_rect(i, &x, &w);
+        bool active = i == (int)s_screen;
+        bool armed = i == 3 && esp_timer_get_time() < s_exit_armed_until;
+        uint16_t bg = armed ? CYD_RED : (active ? CYD_CYAN : CYD_PANEL);
+        const char *label = armed ? "AGAIN" : FOOTER[i];
+        cyd_fill_rect(c, x, FOOTER_Y, w, FOOTER_H, bg);
+        cyd_draw_text(c, label, x + (w - cyd_text_width(label, 1)) / 2, FOOTER_Y + 9, 1,
+                      (active || armed) ? CYD_BLACK : CYD_WHITE);
+    }
+}
+
+/* ---------- Input ---------- */
+
+static void handle_tap(int x, int y, const std::vector<int> &up)
+{
+    s_message[0] = '\0';
+    if (y >= FOOTER_Y - 4) {
+        for (int i = 0; i < 4; ++i) {
+            int bx, bw;
+            footer_rect(i, &bx, &bw);
+            if (x < bx || x >= bx + bw) continue;
+            if (i == 3) {
+                if (esp_timer_get_time() < s_exit_armed_until) cyd_platform_return_to_launcher();
+                s_exit_armed_until = esp_timer_get_time() + 3000000;
+            } else {
+                s_screen = (screen_t)i;
+            }
+        }
+        return;
+    }
+    if (y < ROW_Y0) return;
+    int row = (y - ROW_Y0) / ROW_H;
+    if (s_screen == SCREEN_LIST && row < ROWS && row < (int)up.size()) {
+        s_selected = up[row];
+        s_screen = SCREEN_SKY;
+    } else if (s_screen == SCREEN_PASSES) {
+        xSemaphoreTake(s_pass_lock, portMAX_DELAY);
+        std::vector<std::pair<int, pass_t>> passes = s_passes;
+        xSemaphoreGive(s_pass_lock);
+        time_t now = time(NULL);
+        passes.erase(std::remove_if(passes.begin(), passes.end(),
+                                    [now](const std::pair<int, pass_t> &p) { return p.second.set < now; }),
+                     passes.end());
+        if (row < ROWS && row < (int)passes.size()) {
+            s_selected = passes[row].first;
+            s_screen = SCREEN_SKY;
+        }
+    } else if (s_screen == SCREEN_SKY && x < PANEL_X - 8) {
+        /* Select the satellite nearest to the tap on the sky map. */
+        int best = -1, best_d = 18 * 18;
+        for (int i : up) {
+            int sx, sy;
+            sky_point(s_sats[i].look.az_deg, s_sats[i].look.el_deg, &sx, &sy);
+            int d = (sx - x) * (sx - x) + (sy - y) * (sy - y);
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        if (best >= 0) s_selected = best;
+    }
+}
+
+/* ---------- Startup ---------- */
+
+extern "C" void app_main(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(cyd_display_init());
+    ESP_ERROR_CHECK(cyd_touch_init());
+    ESP_ERROR_CHECK(cyd_button_init());
+    s_sat_lock = xSemaphoreCreateMutex();
+    s_pass_lock = xSemaphoreCreateMutex();
+
+    bool sd = cyd_sd_mount() == ESP_OK;
+    if (sd) load_config();
+    else {
+        s_cfg.min_el = 10;
+        snprintf(s_cfg.group, sizeof(s_cfg.group), "visual");
+    }
+
+    show_status("CONNECTING", "WI-FI FROM THE LAUNCHER", NULL, CYD_CYAN);
+    err = net_wifi_start(20000);
+    if (err == ESP_ERR_NOT_FOUND) fatal("NO WI-FI", "SET UP WIFI.JSON IN THE LAUNCHER", "TAP HERE TO EXIT");
+    if (err != ESP_OK) fatal("WI-FI FAILED", "COULD NOT CONNECT", "TAP HERE TO EXIT");
+
+    show_status("SETTING CLOCK", "NTP: POOL.NTP.ORG", NULL, CYD_CYAN);
+    if (net_sync_time(15000) != ESP_OK) fatal("NO TIME", "COULD NOT REACH AN NTP SERVER", "TAP HERE TO EXIT");
+
+    show_status("LOCATING", s_cfg.have_location ? "FROM CONFIG.JSON" : "FROM YOUR IP ADDRESS", NULL, CYD_CYAN);
+    if (locate_by_ip()) save_location();
+    else if (!s_cfg.have_location) load_saved_location();
+    if (!s_cfg.have_location) {
+        fatal("NO LOCATION", "ADD LAT/LON TO", "/APPS/SAT-TRACKER/CONFIG.JSON");
+    }
+    ESP_LOGI(TAG, "Observer %.4f, %.4f (%s), UTC offset %d s", s_cfg.obs.lat_deg, s_cfg.obs.lon_deg,
+             s_cfg.place, s_cfg.utc_offset_s);
+
+    char line[48];
+    snprintf(line, sizeof(line), "CELESTRAK GROUP %.20s", s_cfg.group);
+    show_status("LOADING ORBITS", line, NULL, CYD_CYAN);
+    bool cached = false;
+    char *tles = get_tles(&cached);
+
+    /* Wi-Fi is no longer needed; its memory holds the satellite data instead. */
+    net_wifi_stop();
+    if (tles == NULL) fatal("NO ORBIT DATA", "CELESTRAK DOWNLOAD FAILED", "AND NO COPY ON THE SD CARD");
+
+    int count = parse_tles(tles);
+    free(tles);
+    if (count == 0) fatal("NO SATELLITES", "THE ORBIT DATA COULD NOT BE READ", NULL);
+    ESP_LOGI(TAG, "%d satellites loaded (%s); free heap %u", count, cached ? "cache" : "download",
+             (unsigned)esp_get_free_heap_size());
+
+    for (int i = 0; i < count; ++i) {
+        if (s_sats[i].sat->catnum == ISS_CATNUM) s_selected = i;
+    }
+    if (s_selected < 0) s_selected = 0;
+    if (cached) snprintf(s_message, sizeof(s_message), "USING SAVED ORBITS");
+
+    xTaskCreatePinnedToCore(pass_task, "passes", 8192, NULL, 2, NULL, 0);
+
+    /* ---------- Main loop ---------- */
+    std::vector<int> up;
+    int64_t last_update = 0, button_since = -1;
+    bool was_touched = false;
+    for (;;) {
+        int64_t now = esp_timer_get_time();
+        bool dirty = false;
+
+        if (now - last_update >= 1000000) {
+            last_update = now;
+            update_positions();
+            up = visible_sorted();
+            dirty = true;
+        }
+
+        int tx, ty;
+        bool touched = cyd_touch_read(&tx, &ty);
+        if (touched && !was_touched) {
+            handle_tap(tx, ty, up);
+            dirty = true;
+        }
+        was_touched = touched;
+
+        if (cyd_button_pressed()) {
+            if (button_since < 0) button_since = now;
+            if (now - button_since > LONG_PRESS_US) cyd_platform_return_to_launcher();
+        } else if (button_since >= 0) {
+            button_since = -1;
+            s_screen = (screen_t)((s_screen + 1) % 3);
+            dirty = true;
+        }
+
+        if (dirty) cyd_display_render(draw_screen, &up);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}

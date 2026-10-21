@@ -1,0 +1,13 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+# Only for the build-time size check; on the device the app runs from the platform's app slot.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# SGP4 math, TLS and the UI run on the main task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+
+# SGP4 uses double precision, which the ESP32 computes in software; run at full speed.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
