@@ -1,0 +1,8 @@
+{
+  "id": "sat-tracker",
+  "name": "Satellites",
+  "version": "0.1.0",
+  "sdk": 1,
+  "binary": "app.bin",
+  "description": "Satellites over your location: sky map, list, and upcoming passes."
+}
