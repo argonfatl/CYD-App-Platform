@@ -44,6 +44,10 @@ ESP-IDF apps that use `cyd_board` get it automatically from `cyd_touch_init()`.
 
 If the launcher could reach an NTP server, the clock is already set when your app starts (it survives the restart into the app). Check `time(NULL) > 1700000000` before relying on it, and sync yourself if it is not set, because a power-on or RST clears it.
 
+## Location
+
+`cyd_platform_get_location(&loc)` returns the location set in the launcher's web page (GET APPS). Arduino apps can read the same values with `Preferences` from namespace `cyd_location`: `lat_u` and `lon_u` (int32, microdegrees), `alt_m`, `utc_off_min`, and `name`.
+
 ## Rules for apps
 
 - Use your own NVS namespace; NVS is shared.

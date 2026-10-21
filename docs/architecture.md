@@ -35,6 +35,10 @@ new launcher (ota_0) ── copy itself ──► factory ── verify ──�
 
 When `wifi.json` is configured, the launcher connects in the background at startup and sets the clock from NTP (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`). ESP-IDF keeps the system time in RTC registers across `esp_restart()`, so an app started from the launcher already has the correct UTC time: `time(NULL)` is later than 2023. A power-on or RST clears it; apps that need the time should check and fall back to their own sync.
 
+## Location
+
+The launcher's web page can save the device location (search uses the Open-Meteo geocoding API from the browser). It is stored in NVS namespace `cyd_location` and read by apps with `cyd_platform_get_location()`: latitude, longitude, altitude, a name, and the browser's UTC offset at the time it was saved.
+
 ## Storage
 
 ```text
