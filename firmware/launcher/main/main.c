@@ -959,6 +959,8 @@ void app_main(void)
     s_ui.progress = -1;
     s_ui.keep_app = cyd_platform_get_keep_app_on_power_on();
     refresh_apps();
+    /* Apps started from here inherit the clock (it survives esp_restart). */
+    launcher_clock_start();
     redraw();
     ESP_LOGI(TAG, "Launcher ready; free heap %" PRIu32 " bytes", esp_get_free_heap_size());
 

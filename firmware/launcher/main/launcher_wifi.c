@@ -2,15 +2,18 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "cJSON.h"
 #include "cyd_board.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "nvs.h"
 
 #define WIFI_FILE      CYD_SD_MOUNT_POINT "/wifi.json"
@@ -24,6 +27,8 @@ static const char *TAG = "launcher_wifi";
 static EventGroupHandle_t s_events;
 static bool s_started;
 static int s_retries;
+static SemaphoreHandle_t s_connect_lock; /* the boot-time clock task and the UI may both connect */
+static bool s_sntp_started;
 
 static bool load_credentials(char *ssid, size_t ssid_len, char *pass, size_t pass_len)
 {
@@ -111,7 +116,40 @@ void launcher_wifi_ip(char *out, int len)
     }
 }
 
+/*
+ * Keeps the clock set from NTP while connected. The time survives esp_restart()
+ * (ESP-IDF keeps it in RTC registers), so apps started from the launcher get it too.
+ */
+static void start_clock_sync(void)
+{
+    if (s_sntp_started) return;
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.google.com", "time.cloudflare.com"));
+    cfg.wait_for_sync = false;
+    if (esp_netif_sntp_init(&cfg) == ESP_OK) {
+        s_sntp_started = true;
+        ESP_LOGI(TAG, "Clock sync started");
+    }
+}
+
+bool launcher_clock_valid(void)
+{
+    return time(NULL) > 1700000000; /* later than November 2023 */
+}
+
+static esp_err_t connect_locked(int timeout_ms);
+
 esp_err_t launcher_wifi_connect(int timeout_ms)
+{
+    if (s_connect_lock == NULL) s_connect_lock = xSemaphoreCreateMutex(); /* first use is on the main task */
+    xSemaphoreTake(s_connect_lock, portMAX_DELAY);
+    esp_err_t err = connect_locked(timeout_ms);
+    if (err == ESP_OK) start_clock_sync();
+    xSemaphoreGive(s_connect_lock);
+    return err;
+}
+
+static esp_err_t connect_locked(int timeout_ms)
 {
     char ssid[33], pass[65];
     if (!load_credentials(ssid, sizeof(ssid), pass, sizeof(pass))) {
@@ -163,4 +201,28 @@ esp_err_t launcher_wifi_connect(int timeout_ms)
     ESP_LOGW(TAG, "Could not connect to \"%s\"", ssid);
     esp_wifi_disconnect();
     return (bits & BIT_FAILED) ? ESP_FAIL : ESP_ERR_TIMEOUT;
+}
+
+static void clock_task(void *arg)
+{
+    if (launcher_wifi_connect(30000) == ESP_OK) {
+        for (int i = 0; i < 60 && !launcher_clock_valid(); ++i) vTaskDelay(pdMS_TO_TICKS(1000));
+        if (launcher_clock_valid()) {
+            time_t now = time(NULL);
+            ESP_LOGI(TAG, "Clock set: %s", ctime(&now));
+        } else {
+            ESP_LOGW(TAG, "Clock not set: no NTP reply");
+        }
+    } else {
+        ESP_LOGW(TAG, "Clock not set: Wi-Fi unavailable");
+    }
+    vTaskDelete(NULL);
+}
+
+void launcher_clock_start(void)
+{
+    if (s_connect_lock == NULL) s_connect_lock = xSemaphoreCreateMutex();
+    if (launcher_wifi_configured() && !launcher_clock_valid()) {
+        xTaskCreatePinnedToCore(clock_task, "clock", 4096, NULL, 3, NULL, 0);
+    }
 }

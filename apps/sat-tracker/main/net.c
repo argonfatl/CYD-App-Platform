@@ -2,6 +2,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "esp_crt_bundle.h"
@@ -99,7 +101,8 @@ void net_wifi_stop(void)
 
 esp_err_t net_sync_time(int timeout_ms)
 {
-    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.google.com", "time.cloudflare.com"));
     esp_err_t err = esp_netif_sntp_init(&cfg);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(timeout_ms));
@@ -108,6 +111,67 @@ esp_err_t net_sync_time(int timeout_ms)
         ESP_LOGI(TAG, "Time set: %s", ctime(&now));
     }
     return err;
+}
+
+/* ---------- Time from an HTTP "Date" header (when NTP/UDP is blocked) ---------- */
+
+static const char *MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+/* Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm). */
+static long days_from_civil(int y, int m, int d)
+{
+    y -= m <= 2;
+    long era = (y >= 0 ? y : y - 399) / 400;
+    long yoe = y - era * 400;
+    long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* Parses "Wed, 21 Oct 2026 23:01:02 GMT". Returns 0 on failure. */
+static time_t parse_http_date(const char *s)
+{
+    int day, year, hh, mm, ss;
+    char mon[4];
+    if (sscanf(s, "%*3s, %d %3s %d %d:%d:%d", &day, mon, &year, &hh, &mm, &ss) != 6) return 0;
+    for (int m = 0; m < 12; ++m) {
+        if (strncmp(mon, MONTHS[m], 3) == 0) {
+            return (time_t)(days_from_civil(year, m + 1, day) * 86400L + hh * 3600L + mm * 60L + ss);
+        }
+    }
+    return 0;
+}
+
+static esp_err_t on_date_header(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(evt->header_key, "Date") == 0) {
+        *(time_t *)evt->user_data = parse_http_date(evt->header_value);
+    }
+    return ESP_OK;
+}
+
+esp_err_t net_time_from_http(const char *url)
+{
+    time_t t = 0;
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_HEAD,
+        .event_handler = on_date_header,
+        .user_data = &t,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 10000,
+        .user_agent = "cyd-app-platform-sat-tracker",
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) return ESP_ERR_NO_MEM;
+    esp_err_t err = esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+    if (t < 1700000000) return err != ESP_OK ? err : ESP_ERR_INVALID_RESPONSE;
+
+    struct timeval tv = {.tv_sec = t, .tv_usec = 0};
+    settimeofday(&tv, NULL);
+    ESP_LOGI(TAG, "Time set from HTTP Date header: %s", ctime(&t));
+    return ESP_OK;
 }
 
 typedef struct {

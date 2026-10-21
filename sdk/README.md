@@ -40,6 +40,10 @@ if (cydGetTouchCalibration(cal)) {
 
 ESP-IDF apps that use `cyd_board` get it automatically from `cyd_touch_init()`.
 
+## Time
+
+If the launcher could reach an NTP server, the clock is already set when your app starts (it survives the restart into the app). Check `time(NULL) > 1700000000` before relying on it, and sync yourself if it is not set, because a power-on or RST clears it.
+
 ## Rules for apps
 
 - Use your own NVS namespace; NVS is shared.

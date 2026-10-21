@@ -166,7 +166,7 @@ static void draw_status(cyd_canvas_t *c, void *ctx)
     text_center(c, s_status.title, 92, 2, s_status.color);
     text_center(c, s_status.line1, 124, 1, CYD_WHITE);
     text_center(c, s_status.line2, 140, 1, CYD_GREY);
-    text_center(c, "HOLD BOOT TO EXIT", 210, 1, CYD_GREY);
+    if (s_status.color == CYD_RED) text_center(c, "TAP OR HOLD BOOT TO EXIT", 210, 1, CYD_GREY);
 }
 
 static void show_status(const char *title, const char *line1, const char *line2, uint16_t color)
@@ -186,7 +186,7 @@ static void show_status(const char *title, const char *line1, const char *line2,
     int64_t pressed_since = -1;
     for (;;) {
         int x, y;
-        if (cyd_touch_read(&x, &y) && y >= 200) cyd_platform_return_to_launcher();
+        if (cyd_touch_read(&x, &y)) cyd_platform_return_to_launcher(); /* any tap */
         if (cyd_button_pressed()) {
             if (pressed_since < 0) pressed_since = esp_timer_get_time();
             if (esp_timer_get_time() - pressed_since > LONG_PRESS_US) cyd_platform_return_to_launcher();
@@ -769,11 +769,28 @@ extern "C" void app_main(void)
 
     show_status("CONNECTING", "WI-FI FROM THE LAUNCHER", NULL, CYD_CYAN);
     err = net_wifi_start(20000);
-    if (err == ESP_ERR_NOT_FOUND) fatal("NO WI-FI", "SET UP WIFI.JSON IN THE LAUNCHER", "TAP HERE TO EXIT");
-    if (err != ESP_OK) fatal("WI-FI FAILED", "COULD NOT CONNECT", "TAP HERE TO EXIT");
+    if (err == ESP_ERR_NOT_FOUND) fatal("NO WI-FI", "SET UP WIFI.JSON IN THE LAUNCHER", NULL);
+    if (err != ESP_OK) fatal("WI-FI FAILED", "COULD NOT CONNECT", NULL);
 
-    show_status("SETTING CLOCK", "NTP: POOL.NTP.ORG", NULL, CYD_CYAN);
-    if (net_sync_time(15000) != ESP_OK) fatal("NO TIME", "COULD NOT REACH AN NTP SERVER", "TAP HERE TO EXIT");
+    /*
+     * The launcher sets the clock from NTP and it survives the restart into this app.
+     * Otherwise try NTP here, then the Date header of a web server (for networks
+     * that block NTP).
+     */
+    const char *clock_source = "LAUNCHER";
+    if (time(NULL) < 1700000000) {
+        show_status("SETTING CLOCK", "NTP", NULL, CYD_CYAN);
+        clock_source = "NTP";
+        if (net_sync_time(10000) != ESP_OK) {
+            show_status("SETTING CLOCK", "WEB SERVER TIME", NULL, CYD_CYAN);
+            clock_source = "WEB";
+            if (net_time_from_http("https://celestrak.org/") != ESP_OK &&
+                net_time_from_http("http://ip-api.com/") != ESP_OK) {
+                fatal("NO TIME", "COULD NOT GET THE TIME FROM", "NTP OR WEB SERVERS");
+            }
+        }
+    }
+    ESP_LOGI(TAG, "Clock from %s", clock_source);
 
     show_status("LOCATING", s_cfg.have_location ? "FROM CONFIG.JSON" : "FROM YOUR IP ADDRESS", NULL, CYD_CYAN);
     if (locate_by_ip()) save_location();
