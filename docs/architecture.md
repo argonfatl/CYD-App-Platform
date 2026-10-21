@@ -31,6 +31,10 @@ launcher (factory) ── download cyd-launcher.bin ──► ota_0 ── verif
 new launcher (ota_0) ── copy itself ──► factory ── verify ──► reboot ──► launcher (factory)
 ```
 
+## Clock
+
+When `wifi.json` is configured, the launcher connects in the background at startup and sets the clock from NTP (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`). ESP-IDF keeps the system time in RTC registers across `esp_restart()`, so an app started from the launcher already has the correct UTC time: `time(NULL)` is later than 2023. A power-on or RST clears it; apps that need the time should check and fall back to their own sync.
+
 ## Storage
 
 ```text

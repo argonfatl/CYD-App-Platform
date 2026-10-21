@@ -20,3 +20,6 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
 
 # FAT long file names for app folders on the SD card.
 CONFIG_FATFS_LFN_HEAP=y
+
+# NTP clock sync with three servers (see launcher_wifi.c).
+CONFIG_LWIP_SNTP_MAX_SERVERS=3

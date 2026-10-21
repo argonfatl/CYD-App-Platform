@@ -11,3 +11,6 @@ CONFIG_COMPILER_CXX_EXCEPTIONS=n
 
 # SGP4 uses double precision, which the ESP32 computes in software; run at full speed.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# NTP fallback with three servers when the launcher did not set the clock.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3

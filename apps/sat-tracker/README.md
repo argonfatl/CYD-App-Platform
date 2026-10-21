@@ -11,7 +11,7 @@ Shows which satellites are above your location right now and when the next passe
 ## How it works
 
 1. Connects to the Wi-Fi network saved by the launcher (`wifi.json`), so there is nothing to set up in the app.
-2. Sets the clock over NTP.
+2. Uses the clock the launcher set. If it is not set (for example right after power-on), tries NTP (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`) and then the `Date` header of a web server, for networks that block NTP.
 3. Gets the location from `config.json` (below) or, if there is none, approximately from the public IP address (ip-api.com). The last location is remembered.
 4. Downloads orbital elements (TLE) for the CelesTrak `visual` group, about 150 of the brightest satellites, and keeps a copy on the SD card. The copy is reused for 12 hours and whenever the download fails.
 5. Turns Wi-Fi off to free memory, then computes positions every second with SGP4.
