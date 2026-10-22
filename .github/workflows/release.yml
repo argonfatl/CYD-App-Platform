@@ -75,6 +75,11 @@ jobs:
           echo "Latest release: $latest -> new release: $next"
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
+      - name: Check app versions
+        # Warns when an app changed since the last release but kept its version,
+        # because devices are only offered an update when the version changes.
+        run: python3 tools/check_app_versions.py
+
       - name: Create and push the tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
