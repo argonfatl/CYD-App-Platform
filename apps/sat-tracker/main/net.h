@@ -9,6 +9,8 @@ extern "C" {
 
 /* Connects using the Wi-Fi network saved by the CYD App Platform launcher (NVS "cyd_wifi"). */
 esp_err_t net_wifi_start(int timeout_ms);
+/* The device's address on the network, such as "192.168.1.50". */
+esp_err_t net_ip_string(char *out, size_t len);
 /* Stops Wi-Fi and frees its memory. */
 void net_wifi_stop(void);
 

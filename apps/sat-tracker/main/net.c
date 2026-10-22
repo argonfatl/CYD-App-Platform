@@ -1,5 +1,6 @@
 #include "net.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -81,6 +82,14 @@ esp_err_t net_wifi_start(int timeout_ms)
         return ESP_OK;
     }
     return (bits & BIT_FAILED) ? ESP_FAIL : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t net_ip_string(char *out, size_t len)
+{
+    esp_netif_ip_info_t ip;
+    if (s_netif == NULL || esp_netif_get_ip_info(s_netif, &ip) != ESP_OK || ip.ip.addr == 0) return ESP_FAIL;
+    snprintf(out, len, IPSTR, IP2STR(&ip.ip));
+    return ESP_OK;
 }
 
 void net_wifi_stop(void)
