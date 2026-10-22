@@ -6,6 +6,7 @@
  *   SKY     a polar sky map of satellites above the horizon
  *   LIST    satellites above the horizon, highest first
  *   PASSES  upcoming passes, computed in the background
+ *   WEB     restarts into setup mode: a settings page for a phone or computer
  *
  * Wi-Fi comes from the launcher's settings; the location from config.json on the
  * SD card or, if absent, from an IP lookup. See README.md.
@@ -23,6 +24,7 @@
 #include "cJSON.h"
 #include "cyd_board.h"
 #include "cyd_platform.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -35,12 +37,11 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sat_math.h"
+#include "app_paths.h"
+#include "web_setup.h"
 
 static const char *TAG = "sat_tracker";
 
-#define APP_DIR          CYD_SD_MOUNT_POINT "/apps/sat-tracker"
-#define CONFIG_PATH      APP_DIR "/config.json"
-#define NVS_NS           "sat_tracker"
 #define TLE_MAX_BYTES    (160 * 1024)
 #define TLE_MAX_AGE_S    (12 * 3600)  /* CelesTrak asks clients not to refetch more often than needed */
 #define TLE_RETRY_S      (2 * 3600)   /* with a saved copy, try downloading at most this often */
@@ -1072,11 +1073,14 @@ static void draw_passes(cyd_canvas_t *c)
     draw_scroll_buttons(c, (int)passes.size());
 }
 
-static const char *FOOTER[] = {"SKY", "LIST", "PASSES", "EXIT"};
+static const char *FOOTER[] = {"SKY", "LIST", "PASSES", "WEB", "EXIT"};
+#define FOOTER_BUTTONS 5
+#define BTN_WEB        3
+#define BTN_EXIT       4
 
 static void footer_rect(int i, int *x, int *w)
 {
-    *w = (CYD_LCD_H_RES - 8 - 3 * 4) / 4;
+    *w = (CYD_LCD_H_RES - 8 - (FOOTER_BUTTONS - 1) * 4) / FOOTER_BUTTONS;
     *x = 4 + i * (*w + 4);
 }
 
@@ -1110,11 +1114,11 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     else if (s_screen == SCREEN_LIST) draw_list(c, up);
     else draw_passes(c);
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < FOOTER_BUTTONS; ++i) {
         int x, w;
         footer_rect(i, &x, &w);
         bool active = i == (int)s_screen;
-        bool armed = i == 3 && esp_timer_get_time() < s_exit_armed_until;
+        bool armed = i == BTN_EXIT && esp_timer_get_time() < s_exit_armed_until;
         uint16_t bg = armed ? CYD_RED : (active ? CYD_RGB(20, 76, 91) : CYD_RGB(20, 29, 43));
         const char *label = armed ? "AGAIN" : FOOTER[i];
         cyd_fill_rect(c, x, FOOTER_Y, w, FOOTER_H, bg);
@@ -1124,19 +1128,109 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     }
 }
 
+/* ---------- Setup mode (settings web page) ---------- */
+
+/*
+ * The settings page needs Wi-Fi, which takes the memory the satellites use. So the
+ * WEB button restarts the app into setup mode, which loads no satellites and only
+ * serves the page. Saving or DONE restarts it again into the normal mode.
+ * A software restart stays in this app (only power-on and RST return to the launcher).
+ */
+#define SETUP_MAGIC 0x57454231u /* "WEB1" */
+static RTC_NOINIT_ATTR uint32_t s_setup_request;
+
+static char s_web_address[32];
+static bool s_web_saved;
+
+#define DONE_X 100
+#define DONE_Y 168
+#define DONE_W 120
+#define DONE_H 34
+
+[[noreturn]] static void restart_in_setup_mode(void)
+{
+    s_setup_request = SETUP_MAGIC;
+    esp_restart();
+}
+
+static void draw_setup(cyd_canvas_t *c, void *ctx)
+{
+    cyd_fill(c, CYD_DARK);
+    cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, HEADER_H - 2, CYD_RGB(13, 23, 37));
+    cyd_fill_rect(c, 0, 0, 3, HEADER_H - 2, CYD_CYAN);
+    cyd_fill_rect(c, 3, HEADER_H - 2, CYD_LCD_H_RES - 3, 2, CYD_CYAN);
+    cyd_draw_text(c, "SETTINGS", 10, 9, 2, CYD_WHITE);
+    if (s_web_saved) {
+        text_center(c, "SAVED", 92, 2, CYD_GREEN);
+        text_center(c, "RESTARTING WITH THE NEW SETTINGS", 124, 1, CYD_GREY);
+        return;
+    }
+    text_center(c, "OPEN IN A BROWSER ON THE SAME WI-FI:", 56, 1, CYD_GREY);
+    char url[48];
+    snprintf(url, sizeof(url), "HTTP://%s", s_web_address);
+    int scale = cyd_text_width(url, 2) <= CYD_LCD_H_RES - 16 ? 2 : 1;
+    text_center(c, url, 76, scale, CYD_CYAN);
+    text_center(c, "CHANGE THE SETTINGS AND PRESS SAVE.", 110, 1, CYD_WHITE);
+    text_center(c, "SATELLITES RESTARTS WITH THEM.", 124, 1, CYD_WHITE);
+    text_center(c, "SATELLITES ARE NOT TRACKED MEANWHILE.", 142, 1, CYD_GREY);
+    cyd_fill_rect(c, DONE_X, DONE_Y, DONE_W, DONE_H, CYD_RGB(20, 76, 91));
+    cyd_fill_rect(c, DONE_X, DONE_Y, DONE_W, 2, CYD_CYAN);
+    text_center(c, "BACK", DONE_Y + 10, 2, CYD_WHITE);
+    text_center(c, "HOLD THE SCREEN 2 S TO EXIT", 216, 1, CYD_GREY);
+}
+
+[[noreturn]] static void run_setup_mode(void)
+{
+    ESP_LOGI(TAG, "Setup mode");
+    show_status("CONNECTING", "WI-FI FROM THE LAUNCHER", NULL, CYD_CYAN);
+    esp_err_t err = net_wifi_start(20000);
+    if (err == ESP_ERR_NOT_FOUND) fatal("NO WI-FI", "SET UP WIFI.JSON IN THE LAUNCHER", NULL);
+    if (err != ESP_OK) fatal("WI-FI FAILED", "COULD NOT CONNECT", NULL);
+    if (net_ip_string(s_web_address, sizeof(s_web_address)) != ESP_OK || web_setup_start() != ESP_OK) {
+        fatal("SETTINGS FAILED", "COULD NOT START THE WEB PAGE", NULL);
+    }
+    ESP_LOGI(TAG, "Settings page at http://%s", s_web_address);
+    xQueueReset(s_taps);
+    cyd_display_render(draw_setup, NULL);
+    int64_t button_since = -1;
+    for (;;) {
+        tap_t tap;
+        while (xQueueReceive(s_taps, &tap, 0) == pdTRUE) {
+            if (tap.x >= DONE_X && tap.x < DONE_X + DONE_W && tap.y >= DONE_Y - 4 && tap.y < DONE_Y + DONE_H + 4) {
+                esp_restart(); /* back to the normal mode, settings unchanged */
+            }
+        }
+        if (cyd_button_pressed()) {
+            if (button_since < 0) button_since = esp_timer_get_time();
+            if (esp_timer_get_time() - button_since > LONG_PRESS_US) cyd_platform_return_to_launcher();
+        } else {
+            button_since = -1;
+        }
+        if (web_setup_saved() && !s_web_saved) {
+            s_web_saved = true;
+            cyd_display_render(draw_setup, NULL);
+            vTaskDelay(pdMS_TO_TICKS(1500)); /* let the response reach the browser */
+            esp_restart();
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
 /* ---------- Input ---------- */
 
 static void handle_tap(int x, int y, const std::vector<int> &up)
 {
     s_message[0] = '\0';
     if (y >= FOOTER_Y - 4) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < FOOTER_BUTTONS; ++i) {
             int bx, bw;
             footer_rect(i, &bx, &bw);
             if (x < bx || x >= bx + bw) continue;
-            if (i == 3) {
+            if (i == BTN_EXIT) {
                 if (esp_timer_get_time() < s_exit_armed_until) cyd_platform_return_to_launcher();
                 s_exit_armed_until = esp_timer_get_time() + 3000000;
+            } else if (i == BTN_WEB) {
+                restart_in_setup_mode();
             } else {
                 if (s_screen != (screen_t)i) s_scroll = 0;
                 s_screen = (screen_t)i;
@@ -1218,6 +1312,10 @@ extern "C" void app_main(void)
         s_cfg.min_el = 10;
         snprintf(s_cfg.group, sizeof(s_cfg.group), "visual");
     }
+
+    bool setup = s_setup_request == SETUP_MAGIC && reset == ESP_RST_SW;
+    s_setup_request = 0;
+    if (setup) run_setup_mode();
 
     show_status("CONNECTING", "WI-FI FROM THE LAUNCHER", NULL, CYD_CYAN);
     err = net_wifi_start(20000);
