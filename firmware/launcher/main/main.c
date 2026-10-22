@@ -35,6 +35,7 @@
 #define ROW_HEIGHT        34
 #define LIST_TOP          40
 #define VISIBLE_ROWS      4
+#define SCROLL_W          34  /* touch scroll buttons beside long lists */
 #define FOOTER_TOP        (LIST_TOP + VISIBLE_ROWS * ROW_HEIGHT + 8)
 #define FOOTER_HEIGHT     22
 #define STATUS_Y          (CYD_LCD_V_RES - 14)
@@ -309,14 +310,64 @@ static void draw_footer_button(cyd_canvas_t *c, int i, const char *label, uint16
     cyd_draw_text(c, label, x + (w - cyd_text_width(label, 1)) / 2, FOOTER_TOP + 7, 1, fg);
 }
 
+/*
+ * Everything must work by touch alone (the BOOT button may be out of reach), so
+ * lists longer than the screen get large up/down buttons on the right.
+ */
+static bool list_scrolls(void)
+{
+    return list_len() > VISIBLE_ROWS;
+}
+
+static int max_scroll(void)
+{
+    int n = list_len() - VISIBLE_ROWS;
+    return n > 0 ? n : 0;
+}
+
+/* Right edge of list rows. */
+static int list_right(void)
+{
+    return CYD_LCD_H_RES - 6 - (list_scrolls() ? SCROLL_W + 4 : 0);
+}
+
 static void draw_row_frame(cyd_canvas_t *c, int row, bool sel)
 {
-    cyd_fill_rect(c, 6, LIST_TOP + row * ROW_HEIGHT, CYD_LCD_H_RES - 12, ROW_HEIGHT - 4, sel ? CYD_CYAN : CYD_PANEL);
+    cyd_fill_rect(c, 6, LIST_TOP + row * ROW_HEIGHT, list_right() - 6, ROW_HEIGHT - 4, sel ? CYD_CYAN : CYD_PANEL);
 }
 
 static void draw_right(cyd_canvas_t *c, const char *text, int y, uint16_t color)
 {
-    cyd_draw_text(c, text, CYD_LCD_H_RES - 16 - cyd_text_width(text, 1), y, 1, color);
+    cyd_draw_text(c, text, list_right() - 10 - cyd_text_width(text, 1), y, 1, color);
+}
+
+/* Filled triangle pointing up or down, centered at (cx, cy). */
+static void draw_arrow(cyd_canvas_t *c, int cx, int cy, bool up, uint16_t color)
+{
+    for (int i = 0; i < 9; ++i) {
+        int row = up ? cy - 4 + i : cy + 4 - i;
+        cyd_fill_rect(c, cx - i, row, 2 * i + 1, 1, color);
+    }
+}
+
+static void scroll_rects(int *x, int *up_y, int *down_y, int *h)
+{
+    *x = CYD_LCD_H_RES - 6 - SCROLL_W;
+    *h = (VISIBLE_ROWS * ROW_HEIGHT - 4 - 4) / 2;
+    *up_y = LIST_TOP;
+    *down_y = LIST_TOP + *h + 4;
+}
+
+static void draw_scroll_buttons(cyd_canvas_t *c)
+{
+    if (!list_scrolls()) return;
+    int x, up_y, down_y, h;
+    scroll_rects(&x, &up_y, &down_y, &h);
+    bool can_up = s_ui.scroll > 0, can_down = s_ui.scroll < max_scroll();
+    cyd_fill_rect(c, x, up_y, SCROLL_W, h, CYD_PANEL);
+    cyd_fill_rect(c, x, down_y, SCROLL_W, h, CYD_PANEL);
+    draw_arrow(c, x + SCROLL_W / 2, up_y + h / 2, true, can_up ? CYD_WHITE : CYD_GREY);
+    draw_arrow(c, x + SCROLL_W / 2, down_y + h / 2, false, can_down ? CYD_WHITE : CYD_GREY);
 }
 
 /* Draw a name without letting it collide with the metadata on the right. */
@@ -374,14 +425,14 @@ static void draw_main_list(cyd_canvas_t *c)
         int y = LIST_TOP + row * ROW_HEIGHT;
         bool sel = (i == s_ui.selected);
         draw_row_frame(c, row, sel);
-        int name_right = CYD_LCD_H_RES - 16;
+        int name_right = list_right() - 10;
         if (app->version[0]) {
             draw_right(c, app->version, y + 6, sel ? CYD_BLACK : CYD_GREY);
             name_right -= cyd_text_width(app->version, 1) + 12;
         }
         draw_clipped_name(c, app->name, 16, y + 4, name_right - 16, 2,
                           sel ? CYD_BLACK : CYD_WHITE);
-        int right = CYD_LCD_H_RES - 16;
+        int right = list_right() - 10;
         if (strcmp(app->id, s_ui.installed_id) == 0) {
             draw_right(c, "INSTALLED", y + 20, sel ? CYD_BLACK : CYD_GREEN);
             right -= cyd_text_width("INSTALLED", 1) + 8;
@@ -424,7 +475,7 @@ static void draw_store_list(cyd_canvas_t *c)
         draw_right(c, app->official ? "OFFICIAL" : "GITHUB", y + 20,
                    sel ? CYD_BLACK : (app->official ? CYD_GREY : CYD_AMBER));
         draw_clipped_name(c, app->name, 16, y + 4,
-                          CYD_LCD_H_RES - 32 - cyd_text_width(state, 1) - 12,
+                          list_right() - 26 - cyd_text_width(state, 1) - 12,
                           2, sel ? CYD_BLACK : CYD_WHITE);
     }
 }
@@ -457,8 +508,10 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
         cyd_fill_rect(c, 20, 120, (CYD_LCD_H_RES - 40) * s_ui.progress / 100, 16, CYD_CYAN);
     } else if (s_ui.store_mode) {
         draw_store_list(c);
+        draw_scroll_buttons(c);
     } else {
         draw_main_list(c);
+        if (s_ui.sd_ok) draw_scroll_buttons(c);
     }
 
     int base = list_len();
@@ -753,6 +806,7 @@ static void store_reload(void)
         set_status("", CYD_GREY);
     }
     if (s_ui.selected >= list->count + footer_count()) reset_selection();
+    if (s_ui.scroll > max_scroll()) s_ui.scroll = max_scroll();
     redraw();
 }
 
@@ -898,10 +952,30 @@ static void activate_selected(void)
     }
 }
 
-/* Returns the item index under a touch point, or -1. */
+#define TOUCH_SCROLL_UP   (-2)
+#define TOUCH_SCROLL_DOWN (-3)
+
+/* Moves the visible part of the list by most of a page. */
+static void scroll_list(int pages)
+{
+    int s = s_ui.scroll + pages * (VISIBLE_ROWS - 1);
+    if (s < 0) s = 0;
+    if (s > max_scroll()) s = max_scroll();
+    s_ui.scroll = s;
+}
+
+/* Returns the item index under a touch point, a TOUCH_SCROLL_* code, or -1. */
 static int item_at(int x, int y)
 {
     int rows = list_len();
+    if (list_scrolls() && s_ui.progress < 0) {
+        int sx, up_y, down_y, h;
+        scroll_rects(&sx, &up_y, &down_y, &h);
+        if (x >= sx - 2) {
+            if (y >= up_y && y < up_y + h + 2) return TOUCH_SCROLL_UP;
+            if (y >= down_y - 2 && y < down_y + h) return TOUCH_SCROLL_DOWN;
+        }
+    }
     if (y >= FOOTER_TOP && y < FOOTER_TOP + FOOTER_HEIGHT) {
         for (int i = 0; i < footer_count(); ++i) {
             int bx, bw;
@@ -930,7 +1004,7 @@ static void refresh_apps(void)
 
     char sha[65];
     load_installed(s_ui.installed_id, sizeof(s_ui.installed_id), sha, sizeof(sha));
-    set_status(s_ui.count > 0 ? "TAP SELECT, TAP AGAIN OPEN; HOLD BOOT OPEN" : "", CYD_GREY);
+    set_status(s_ui.count > 0 ? "TAP AN APP, THEN TAP IT AGAIN TO OPEN" : "", CYD_GREY);
 }
 
 void app_main(void)
@@ -982,7 +1056,10 @@ void app_main(void)
         bool touched = cyd_touch_read(&tx, &ty);
         if (touched && !was_touched) {
             int item = item_at(tx, ty);
-            if (item >= 0) {
+            if (item == TOUCH_SCROLL_UP || item == TOUCH_SCROLL_DOWN) {
+                scroll_list(item == TOUCH_SCROLL_UP ? -1 : 1);
+                redraw();
+            } else if (item >= 0) {
                 if (item == s_ui.selected) {
                     activate_selected();
                 } else {

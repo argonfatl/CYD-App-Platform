@@ -6,7 +6,8 @@
  * user try it out, and saves it for the launcher and all apps.
  *
  * Works without any existing calibration because it only uses raw readings
- * until the new calibration is computed. Hold BOOT to leave without saving.
+ * until the new calibration is computed. Everything works by touch alone: hold the
+ * screen anywhere for 3 seconds (or BOOT) to leave without saving.
  */
 #include <math.h>
 #include <stdio.h>
@@ -28,11 +29,15 @@
 #define LONG_PRESS_US    700000
 #define TRAIL_LEN        64
 
+#define CANCEL_HOLD_US   3000000 /* holding the screen this long leaves without saving */
+#define IDLE_EXIT_US     90000000 /* and so does leaving it untouched */
+
 #define BTN_Y            186
 #define BTN_H            44
-#define BTN_W            110
-#define REDO_X           12
-#define SAVE_X           (CYD_LCD_H_RES - 12 - BTN_W)
+#define BTN_W            96
+#define REDO_X           8
+#define CANCEL_X         ((CYD_LCD_H_RES - BTN_W) / 2)
+#define SAVE_X           (CYD_LCD_H_RES - 8 - BTN_W)
 
 static const char *TAG = "touch_cal";
 
@@ -92,7 +97,7 @@ static void draw(cyd_canvas_t *c, void *ctx)
         draw_centered(c, "WITH A STYLUS OR FINGERNAIL", 112, 1, CYD_GREY);
         draw_centered(c, step, 136, 1, CYD_CYAN);
         draw_centered(c, s.message, 156, 1, s.message_color);
-        draw_centered(c, "HOLD BOOT TO CANCEL", 176, 1, CYD_GREY);
+        draw_centered(c, "TO CANCEL, HOLD THE SCREEN FOR 3 S", 176, 1, CYD_GREY);
         draw_crosshair(c, s_target_x[s.target], s_target_y[s.target], CYD_AMBER);
     } else if (s.mode == MODE_TEST) {
         draw_centered(c, "DRAW TO TEST THE TOUCH", 12, 1, CYD_WHITE);
@@ -101,6 +106,7 @@ static void draw(cyd_canvas_t *c, void *ctx)
             cyd_fill_rect(c, s.trail_x[i] - 2, s.trail_y[i] - 2, 5, 5, CYD_CYAN);
         }
         draw_button(c, REDO_X, "REDO", CYD_AMBER);
+        draw_button(c, CANCEL_X, "CANCEL", CYD_GREY);
         draw_button(c, SAVE_X, "SAVE", CYD_GREEN);
     } else {
         draw_centered(c, "CALIBRATION SAVED", 100, 2, CYD_GREEN);
@@ -181,6 +187,8 @@ void app_main(void)
     bool was_pressed = false;
     int64_t button_since = -1;
     int64_t last_draw = 0;
+    int64_t press_since = -1;
+    int64_t last_activity = esp_timer_get_time();
 
     for (;;) {
         int64_t now = esp_timer_get_time();
@@ -196,6 +204,15 @@ void app_main(void)
         if (s.mode == MODE_TARGET) {
             int rx, ry;
             bool pressed = cyd_touch_read_raw(&rx, &ry);
+            /* A long hold anywhere, or no touch for a while, leaves without saving. */
+            if (pressed) {
+                last_activity = now;
+                if (press_since < 0) press_since = now;
+                if (now - press_since > CANCEL_HOLD_US) cyd_platform_return_to_launcher();
+            } else {
+                press_since = -1;
+                if (now - last_activity > IDLE_EXIT_US) cyd_platform_return_to_launcher();
+            }
             if (pressed) {
                 sum_x += rx;
                 sum_y += ry;
@@ -234,6 +251,8 @@ void app_main(void)
                 set_message("SAVING FAILED - TRY AGAIN", CYD_RED);
                 start_targets();
                 redraw();
+            } else if (pressed && !was_pressed && in_button(x, y, CANCEL_X)) {
+                cyd_platform_return_to_launcher();
             } else if (pressed && !was_pressed && in_button(x, y, REDO_X)) {
                 set_message("", CYD_GREY);
                 start_targets();

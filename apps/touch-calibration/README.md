@@ -2,11 +2,11 @@
 
 A system app that calibrates the resistive touch screen for the launcher and every app that uses `cyd_board`.
 
-1. Open **Touch Setup** in the launcher. If touch is badly off, use the BOOT button: short press moves, long press opens.
+1. Open **Touch Setup** in the launcher. If touch is badly off, the BOOT button can also open it (short press moves, long press opens).
 2. Press the center of each of the four corner targets, then the center target. A stylus or fingernail gives the best result.
-3. Draw on the test screen to check that the dots follow, then tap **SAVE**, or **REDO** to start over.
+3. Draw on the test screen to check that the dots follow, then tap **SAVE**, **REDO** to start over, or **CANCEL**.
 
-Hold **BOOT** at any time to leave without saving.
+To leave without saving while the targets are shown, hold the screen anywhere for 3 seconds (or hold BOOT). After 90 seconds without a touch the app returns to the launcher by itself.
 
 The app fits an affine map from raw XPT2046 readings to screen pixels, so it handles scaling, offsets, swapped axes, and mirroring. The center target is used only as a check: if it is more than 15 pixels off, the app asks you to repeat the calibration.
 

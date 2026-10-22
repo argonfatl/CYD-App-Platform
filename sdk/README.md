@@ -52,4 +52,5 @@ If the launcher could reach an NTP server, the clock is already set when your ap
 
 - Use your own NVS namespace; NVS is shared.
 - Keep large data on the SD card under `/apps/<app-id>/data/`.
-- Provide a way to exit; RST always works as a fallback.
+- Make every action possible by touch. The BOOT button may be hidden inside a case, so use it only as an optional shortcut; lists longer than the screen need on-screen scroll buttons.
+- Provide an on-screen way to return to the launcher; RST always works as a fallback.
