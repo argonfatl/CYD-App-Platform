@@ -6,7 +6,7 @@ Shows which satellites are above your location right now and when the next passe
 - **OVERHEAD** (LIST) — satellites above the horizon, highest first. Tap one to show it on the sky map.
 - **PASSES** — passes in the next 12 hours that climb at least 10° (configurable), with local start time, peak elevation, duration, and direction. Passes in progress are green and marked NOW. They are computed in the background after start-up, which takes a while on the ESP32.
 
-**BOOT**: short press switches screens, long press returns to the launcher. **EXIT** at the bottom needs two taps.
+Everything works by touch: the buttons at the bottom switch screens, ▲/▼ on the right page through long lists, and **EXIT** (two taps) returns to the launcher. BOOT is an optional shortcut: short press switches screens, long press exits.
 
 ## How it works
 

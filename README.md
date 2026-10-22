@@ -18,7 +18,7 @@ Every app is an ordinary, complete ESP32 firmware image (Arduino or ESP-IDF).
 4. An app returns to the launcher by calling `cyd_platform_return_to_launcher()` (ESP-IDF) or `cydReturnToLauncher()` (Arduino).
 5. Apps that know nothing about the platform still get a way back: pressing **RST** or power-cycling returns to the launcher. This can be switched off in the launcher if you want the last app to start on power-on.
 
-The launcher works with touch or with the **BOOT** button alone: short press moves to the next item, long press opens it.
+Everything in the launcher and the bundled apps works by touch: tap an app to select it and tap it again to open it; long lists have ▲/▼ buttons on the right. The **BOOT** button is an optional shortcut (short press: next item, long press: open).
 
 The header shows the battery level on boards that route the battery voltage to GPIO34 through a 2 × 100 kΩ divider (ELEGOO / LCDwiki ESP32-32E "E32R28T" boards). Other boards show `BAT --`; change `CYD_BAT_ADC_GPIO` and `CYD_BAT_DIVIDER` in `components/cyd_board/include/cyd_board.h` if yours is wired differently.
 

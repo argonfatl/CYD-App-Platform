@@ -59,6 +59,7 @@ static const char *TAG = "sat_tracker";
 #define ROW_Y0     40
 #define ROW_H      24
 #define ROWS       7
+#define SCROLL_W   30   /* touch scroll buttons beside long lists */
 
 enum screen_t { SCREEN_SKY, SCREEN_LIST, SCREEN_PASSES };
 
@@ -92,6 +93,7 @@ static screen_t s_screen = SCREEN_SKY;
 static int s_selected = -1;
 static int64_t s_exit_armed_until;
 static char s_message[64];
+static int s_scroll; /* first row shown on LIST and PASSES */
 
 /* ---------- Small drawing helpers ---------- */
 
@@ -638,37 +640,83 @@ static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
     cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_GREY);
 }
 
+/* Upcoming or current passes (the background list also holds ones that ended). */
+static std::vector<std::pair<int, pass_t>> current_passes(void)
+{
+    xSemaphoreTake(s_pass_lock, portMAX_DELAY);
+    std::vector<std::pair<int, pass_t>> passes = s_passes;
+    xSemaphoreGive(s_pass_lock);
+    time_t now = time(NULL);
+    passes.erase(std::remove_if(passes.begin(), passes.end(),
+                                [now](const std::pair<int, pass_t> &p) { return p.second.set < now; }),
+                 passes.end());
+    return passes;
+}
+
+/* Everything works by touch (BOOT may be out of reach): long lists get up/down buttons. */
+static int row_right(int count)
+{
+    return count > ROWS ? CYD_LCD_H_RES - 4 - SCROLL_W - 4 : CYD_LCD_H_RES - 4;
+}
+
+static int clamp_scroll(int count)
+{
+    int max = count > ROWS ? count - ROWS : 0;
+    if (s_scroll > max) s_scroll = max;
+    if (s_scroll < 0) s_scroll = 0;
+    return s_scroll;
+}
+
+static void draw_arrow(cyd_canvas_t *c, int cx, int cy, bool up, uint16_t color)
+{
+    for (int i = 0; i < 9; ++i) cyd_fill_rect(c, cx - i, up ? cy - 4 + i : cy + 4 - i, 2 * i + 1, 1, color);
+}
+
+static void draw_scroll_buttons(cyd_canvas_t *c, int count)
+{
+    if (count <= ROWS) return;
+    int x = CYD_LCD_H_RES - 4 - SCROLL_W, h = (ROWS * ROW_H - 3 - 4) / 2;
+    cyd_fill_rect(c, x, ROW_Y0, SCROLL_W, h, CYD_PANEL);
+    cyd_fill_rect(c, x, ROW_Y0 + h + 4, SCROLL_W, h, CYD_PANEL);
+    draw_arrow(c, x + SCROLL_W / 2, ROW_Y0 + h / 2, true, s_scroll > 0 ? CYD_WHITE : CYD_GREY);
+    draw_arrow(c, x + SCROLL_W / 2, ROW_Y0 + h + 4 + h / 2, false, s_scroll < count - ROWS ? CYD_WHITE : CYD_GREY);
+}
+
+/* Returns -1/+1 when the tap hit a scroll button, else 0. */
+static int scroll_button_at(int x, int y, int count)
+{
+    if (count <= ROWS || x < CYD_LCD_H_RES - 6 - SCROLL_W || y < ROW_Y0 || y >= ROW_Y0 + ROWS * ROW_H) return 0;
+    return y < ROW_Y0 + ROWS * ROW_H / 2 ? -1 : 1;
+}
+
 static void draw_list(cyd_canvas_t *c, const std::vector<int> &up)
 {
     if (up.empty()) {
         text_center(c, "NOTHING ABOVE THE HORIZON", 110, 1, CYD_GREY);
         return;
     }
-    for (int row = 0; row < ROWS && row < (int)up.size(); ++row) {
-        const entry_t &e = s_sats[up[row]];
+    int first = clamp_scroll((int)up.size()), right = row_right((int)up.size());
+    for (int row = 0; row < ROWS && first + row < (int)up.size(); ++row) {
+        int idx = up[first + row];
+        const entry_t &e = s_sats[idx];
         int y = ROW_Y0 + row * ROW_H;
-        bool sel = up[row] == s_selected;
-        cyd_fill_rect(c, 4, y, CYD_LCD_H_RES - 8, ROW_H - 3, sel ? CYD_AMBER : CYD_PANEL);
+        bool sel = idx == s_selected;
+        cyd_fill_rect(c, 4, y, right - 4, ROW_H - 3, sel ? CYD_AMBER : CYD_PANEL);
         uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
-        text_clipped(c, e.sat->name, 10, y + 4, 2, 170, fg);
+        text_clipped(c, e.sat->name, 10, y + 4, 2, right - 150, fg);
         char buf[32];
         snprintf(buf, sizeof(buf), "EL %2.0f %s", e.look.el_deg, compass(e.look.az_deg));
-        text_right(c, buf, CYD_LCD_H_RES - 10, y + 3, 1, sel ? CYD_BLACK : el_color(e.look.el_deg));
+        text_right(c, buf, right - 6, y + 3, 1, sel ? CYD_BLACK : el_color(e.look.el_deg));
         snprintf(buf, sizeof(buf), "%.0f KM", e.look.range_km);
-        text_right(c, buf, CYD_LCD_H_RES - 10, y + 12, 1, sel ? CYD_BLACK : CYD_GREY);
+        text_right(c, buf, right - 6, y + 12, 1, sel ? CYD_BLACK : CYD_GREY);
     }
+    draw_scroll_buttons(c, (int)up.size());
 }
 
 static void draw_passes(cyd_canvas_t *c)
 {
-    xSemaphoreTake(s_pass_lock, portMAX_DELAY);
-    std::vector<std::pair<int, pass_t>> passes = s_passes;
-    xSemaphoreGive(s_pass_lock);
-
+    std::vector<std::pair<int, pass_t>> passes = current_passes();
     time_t now = time(NULL);
-    passes.erase(std::remove_if(passes.begin(), passes.end(),
-                                [now](const std::pair<int, pass_t> &p) { return p.second.set < now; }),
-                 passes.end());
 
     if (passes.empty()) {
         char buf[40];
@@ -677,22 +725,24 @@ static void draw_passes(cyd_canvas_t *c)
         text_center(c, buf, 110, 1, CYD_GREY);
         return;
     }
-    for (int row = 0; row < ROWS && row < (int)passes.size(); ++row) {
-        const pass_t &p = passes[row].second;
-        int idx = passes[row].first;
+    int first = clamp_scroll((int)passes.size()), right = row_right((int)passes.size());
+    for (int row = 0; row < ROWS && first + row < (int)passes.size(); ++row) {
+        const pass_t &p = passes[first + row].second;
+        int idx = passes[first + row].first;
         int y = ROW_Y0 + row * ROW_H;
         bool now_up = p.rise <= now && now <= p.set;
         bool sel = idx == s_selected;
-        cyd_fill_rect(c, 4, y, CYD_LCD_H_RES - 8, ROW_H - 3, sel ? CYD_AMBER : (now_up ? CYD_RGB(10, 60, 30) : CYD_PANEL));
+        cyd_fill_rect(c, 4, y, right - 4, ROW_H - 3, sel ? CYD_AMBER : (now_up ? CYD_RGB(10, 60, 30) : CYD_PANEL));
         uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
         char t[8], buf[48];
         local_hhmm(p.rise, t, sizeof(t), false);
         cyd_draw_text(c, now_up ? "NOW" : t, 10, y + 4, 2, sel ? CYD_BLACK : (now_up ? CYD_GREEN : CYD_CYAN));
-        text_clipped(c, s_sats[idx].sat->name, 78, y + 3, 1, CYD_LCD_H_RES - 88, fg);
+        text_clipped(c, s_sats[idx].sat->name, 78, y + 3, 1, right - 84, fg);
         snprintf(buf, sizeof(buf), "MAX %.0f  %d MIN  %s>%s", p.max_el_deg, (int)((p.set - p.rise + 30) / 60),
                  compass(p.rise_az_deg), compass(p.set_az_deg));
-        cyd_draw_text(c, buf, 78, y + 12, 1, sel ? CYD_BLACK : CYD_GREY);
+        text_clipped(c, buf, 78, y + 12, 1, right - 84, sel ? CYD_BLACK : CYD_GREY);
     }
+    draw_scroll_buttons(c, (int)passes.size());
 }
 
 static const char *FOOTER[] = {"SKY", "LIST", "PASSES", "EXIT"};
@@ -753,6 +803,7 @@ static void handle_tap(int x, int y, const std::vector<int> &up)
                 if (esp_timer_get_time() < s_exit_armed_until) cyd_platform_return_to_launcher();
                 s_exit_armed_until = esp_timer_get_time() + 3000000;
             } else {
+                if (s_screen != (screen_t)i) s_scroll = 0;
                 s_screen = (screen_t)i;
             }
         }
@@ -760,19 +811,23 @@ static void handle_tap(int x, int y, const std::vector<int> &up)
     }
     if (y < ROW_Y0) return;
     int row = (y - ROW_Y0) / ROW_H;
-    if (s_screen == SCREEN_LIST && row < ROWS && row < (int)up.size()) {
-        s_selected = up[row];
-        s_screen = SCREEN_SKY;
+    if (s_screen == SCREEN_LIST) {
+        int count = (int)up.size(), step = scroll_button_at(x, y, count);
+        if (step) {
+            s_scroll += step * (ROWS - 1);
+            clamp_scroll(count);
+        } else if (row < ROWS && s_scroll + row < count) {
+            s_selected = up[s_scroll + row];
+            s_screen = SCREEN_SKY;
+        }
     } else if (s_screen == SCREEN_PASSES) {
-        xSemaphoreTake(s_pass_lock, portMAX_DELAY);
-        std::vector<std::pair<int, pass_t>> passes = s_passes;
-        xSemaphoreGive(s_pass_lock);
-        time_t now = time(NULL);
-        passes.erase(std::remove_if(passes.begin(), passes.end(),
-                                    [now](const std::pair<int, pass_t> &p) { return p.second.set < now; }),
-                     passes.end());
-        if (row < ROWS && row < (int)passes.size()) {
-            s_selected = passes[row].first;
+        std::vector<std::pair<int, pass_t>> passes = current_passes();
+        int count = (int)passes.size(), step = scroll_button_at(x, y, count);
+        if (step) {
+            s_scroll += step * (ROWS - 1);
+            clamp_scroll(count);
+        } else if (row < ROWS && s_scroll + row < count) {
+            s_selected = passes[s_scroll + row].first;
             s_screen = SCREEN_SKY;
         }
     } else if (s_screen == SCREEN_SKY && x < PANEL_X - 8) {
@@ -927,6 +982,7 @@ extern "C" void app_main(void)
         } else if (button_since >= 0) {
             button_since = -1;
             s_screen = (screen_t)((s_screen + 1) % 3);
+            s_scroll = 0;
             dirty = true;
         }
 
