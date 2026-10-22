@@ -43,6 +43,7 @@ static const char *TAG = "sat_tracker";
 #define NVS_NS           "sat_tracker"
 #define TLE_MAX_BYTES    (160 * 1024)
 #define TLE_MAX_AGE_S    (12 * 3600)  /* CelesTrak asks clients not to refetch more often than needed */
+#define TLE_RETRY_S      (2 * 3600)   /* with a saved copy, try downloading at most this often */
 #define MAX_SATS         220
 /*
  * Each satellite needs about 1 KB for its SGP4 state. Stop loading while this much
@@ -85,6 +86,9 @@ struct entry_t {
     satellite_t *sat;
     look_t look;
     bool valid;
+    bool reloaded;  /* re-read from the SD card once after an SGP4 error */
+    int8_t error;   /* last SGP4 error code, 0 if none */
+    long offset;    /* position of line 1 in the cache file, -1 if not from the file */
 };
 
 static config_t s_cfg;
@@ -433,6 +437,28 @@ static int64_t tle_saved_at(void)
     return t;
 }
 
+/* Time of the last download attempt, saved before trying so a crash or restart cannot repeat it. */
+static int64_t tle_tried_at(void)
+{
+    nvs_handle_t h;
+    int64_t t = 0;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_i64(h, "tle_try", &t);
+        nvs_close(h);
+    }
+    return t;
+}
+
+static void set_tle_tried_at(int64_t t)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_i64(h, "tle_try", t);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
 static bool save_tle_cache(const char *text)
 {
     char path[64];
@@ -473,6 +499,13 @@ static bool get_tles(char **text, bool *from_cache)
         ESP_LOGI(TAG, "Using cached TLEs (%lld min old)", (long long)(age / 60));
         return true;
     }
+    int64_t since_try = (int64_t)time(NULL) - tle_tried_at();
+    if (have_cache && since_try >= 0 && since_try < TLE_RETRY_S) {
+        *from_cache = true;
+        ESP_LOGI(TAG, "Last download attempt %lld min ago; using the saved copy", (long long)(since_try / 60));
+        return true;
+    }
+    set_tle_tried_at((int64_t)time(NULL));
 
     char url[128];
     snprintf(url, sizeof(url), "https://celestrak.org/NORAD/elements/gp.php?GROUP=%s&FORMAT=tle", s_cfg.group);
@@ -496,7 +529,7 @@ static bool get_tles(char **text, bool *from_cache)
 }
 
 /* Adds one satellite unless memory is getting low. Returns false to stop loading. */
-static bool add_satellite(const char *name, const char *line1, const char *line2, int limit)
+static bool add_satellite(const char *name, const char *line1, const char *line2, int limit, long offset)
 {
     if ((int)s_sats.size() >= limit) return false;
     if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < HEAP_RESERVE + sizeof(satellite_t)) {
@@ -509,6 +542,7 @@ static bool add_satellite(const char *name, const char *line1, const char *line2
     if (sat_parse_tle(name, line1, line2, sat)) {
         entry_t e = {};
         e.sat = sat;
+        e.offset = offset;
         s_sats.push_back(e);
     } else {
         free(sat);
@@ -538,7 +572,7 @@ static int load_satellites(char *text, int limit)
             if (is_line(cur, '1')) {
                 snprintf(l1, sizeof(l1), "%s", cur);
             } else if (is_line(cur, '2') && l1[0]) {
-                if (!add_satellite(prev[0] ? prev : NULL, l1, cur, limit)) break;
+                if (!add_satellite(prev[0] ? prev : NULL, l1, cur, limit, -1)) break;
                 l1[0] = prev[0] = '\0';
             } else {
                 snprintf(prev, sizeof(prev), "%s", cur);
@@ -550,13 +584,17 @@ static int load_satellites(char *text, int limit)
     tle_cache_path(path, sizeof(path));
     FILE *f = fopen(path, "r");
     if (f == NULL) return 0;
+    long pos = 0, l1_pos = -1;
     while (fgets(cur, sizeof(cur), f)) {
+        long line_pos = pos;
+        pos = ftell(f);
         trim_eol(cur);
         if (!cur[0]) continue;
         if (is_line(cur, '1')) {
             snprintf(l1, sizeof(l1), "%s", cur);
+            l1_pos = line_pos;
         } else if (is_line(cur, '2') && l1[0]) {
-            if (!add_satellite(prev[0] ? prev : NULL, l1, cur, limit)) break;
+            if (!add_satellite(prev[0] ? prev : NULL, l1, cur, limit, l1_pos)) break;
             l1[0] = prev[0] = '\0';
         } else {
             snprintf(prev, sizeof(prev), "%s", cur);
@@ -568,6 +606,29 @@ static int load_satellites(char *text, int limit)
 
 /* ---------- Positions ---------- */
 
+/*
+ * Re-reads a satellite's elements from the cache file. SGP4 does not fail for a
+ * correct orbit near its epoch, so a failure means the in-memory state is bad.
+ */
+static bool reload_satellite(entry_t &e)
+{
+    if (e.offset < 0) return false;
+    char path[64], l1[80], l2[80], name[sizeof(e.sat->name)];
+    tle_cache_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return false;
+    bool ok = fseek(f, e.offset, SEEK_SET) == 0 && fgets(l1, sizeof(l1), f) && fgets(l2, sizeof(l2), f);
+    fclose(f);
+    if (!ok) return false;
+    trim_eol(l1);
+    trim_eol(l2);
+    snprintf(name, sizeof(name), "%s", e.sat->name);
+    xSemaphoreTake(s_sat_lock, portMAX_DELAY);
+    ok = sat_parse_tle(name, l1, l2, e.sat);
+    xSemaphoreGive(s_sat_lock);
+    return ok;
+}
+
 static void update_positions(void)
 {
     time_t now = time(NULL);
@@ -575,7 +636,21 @@ static void update_positions(void)
     for (auto &e : s_sats) {
         xSemaphoreTake(s_sat_lock, portMAX_DELAY);
         e.valid = sat_look(e.sat, &s_cfg.obs, jd, &e.look);
+        e.error = (int8_t)e.sat->rec.error;
+        double days = jd - e.sat->rec.jdsatepoch - e.sat->rec.jdsatepochF;
         xSemaphoreGive(s_sat_lock);
+        if (!e.valid && !e.reloaded) {
+            e.reloaded = true;
+            ESP_LOGW(TAG, "SGP4 error %d for %s (%.1f days from epoch); heap %s", e.error, e.sat->name, days,
+                     heap_caps_check_integrity_all(true) ? "ok" : "CORRUPT");
+            if (reload_satellite(e)) {
+                xSemaphoreTake(s_sat_lock, portMAX_DELAY);
+                e.valid = sat_look(e.sat, &s_cfg.obs, jd, &e.look);
+                e.error = (int8_t)e.sat->rec.error;
+                xSemaphoreGive(s_sat_lock);
+                ESP_LOGW(TAG, "Reloaded %s: %s", e.sat->name, e.valid ? "fixed" : "still failing");
+            }
+        }
     }
 }
 
@@ -707,6 +782,11 @@ static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
     y += 14;
     if (!e.valid) {
         cyd_draw_text(c, "NO POSITION", PANEL_X, y, 1, CYD_RED);
+        snprintf(buf, sizeof(buf), "SGP4 ERROR %d", e.error);
+        cyd_draw_text(c, buf, PANEL_X, y + 12, 1, CYD_GREY);
+        double age = sat_jd(time(NULL), 0) - e.sat->rec.jdsatepoch - e.sat->rec.jdsatepochF;
+        snprintf(buf, sizeof(buf), "DATA %.0f DAYS OLD", age);
+        cyd_draw_text(c, buf, PANEL_X, y + 24, 1, CYD_GREY);
         return;
     }
     if (e.look.el_deg > 0) {
