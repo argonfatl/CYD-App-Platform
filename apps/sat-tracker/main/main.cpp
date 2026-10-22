@@ -64,7 +64,7 @@ static const char *TAG = "sat_tracker";
 #define FOOTER_H   24
 #define SKY_CX     118
 #define SKY_CY     124
-#define SKY_R      86
+#define SKY_R      79   /* leaves room for the N and S labels between the header and the footer */
 #define PANEL_X    218
 #define ROW_Y0     40
 #define ROW_H      24
@@ -109,7 +109,9 @@ static volatile bool s_pass_ready;
 static screen_t s_screen = SCREEN_SKY;
 static int s_selected = -1;
 static int64_t s_exit_armed_until;
-static char s_message[64];
+static char s_message[40];
+static int64_t s_message_until; /* the message replaces the place name in the header until then */
+#define MESSAGE_US 15000000
 static int s_scroll; /* first row shown on LIST and PASSES */
 static bool s_crashed; /* the previous run ended in a panic or watchdog reset */
 static filter_t s_filter = FILTER_ALL;
@@ -1092,17 +1094,21 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     char clock[12];
     local_hhmm(time(NULL), clock, sizeof(clock), true);
     text_right(c, clock, CYD_LCD_H_RES - 8, 5, 1, CYD_CYAN);
-    char place[24];
-    snprintf(place, sizeof(place), "%.20s", s_cfg.place);
-    text_right(c, place, CYD_LCD_H_RES - 8, 18, 1, CYD_GREY);
-    snprintf(place, sizeof(place), "%s %d SAVED", filter_name(), (int)s_favorite_ids.size());
-    cyd_draw_text(c, place, 10, 22, 1, CYD_CYAN);
+    if (s_message[0] && esp_timer_get_time() < s_message_until) {
+        /* Short notices go in the header, where they cannot cover the sky map or a list row. */
+        text_right(c, s_message, CYD_LCD_H_RES - 8, 18, 1, CYD_AMBER);
+    } else {
+        char place[24];
+        snprintf(place, sizeof(place), "%.20s", s_cfg.place);
+        text_right(c, place, CYD_LCD_H_RES - 8, 18, 1, CYD_GREY);
+    }
+    char filter[24];
+    snprintf(filter, sizeof(filter), "%s %d SAVED", filter_name(), (int)s_favorite_ids.size());
+    cyd_draw_text(c, filter, 10, 22, 1, CYD_CYAN);
 
     if (s_screen == SCREEN_SKY) draw_sky(c, up);
     else if (s_screen == SCREEN_LIST) draw_list(c, up);
     else draw_passes(c);
-
-    if (s_message[0]) text_center(c, s_message, FOOTER_Y - 11, 1, CYD_AMBER);
 
     for (int i = 0; i < 4; ++i) {
         int x, w;
@@ -1143,6 +1149,7 @@ static void handle_tap(int x, int y, const std::vector<int> &up)
         s_scroll = 0;
         save_ui_preferences();
         snprintf(s_message, sizeof(s_message), "FILTER %s", filter_name());
+        s_message_until = esp_timer_get_time() + 3000000; /* shown in the header briefly */
         return;
     }
     if (y < ROW_Y0) return;
@@ -1287,7 +1294,7 @@ extern "C" void app_main(void)
     int limit = MAX_SATS;
     if (s_crashed) {
         limit = 60;
-        snprintf(s_message, sizeof(s_message), "RESTARTED AFTER A CRASH: 60 SATELLITES");
+        snprintf(s_message, sizeof(s_message), "CRASH: 60 SATELLITES");
     }
     ESP_LOGI(TAG, "Free heap before loading %u (largest block %u)", (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -1302,6 +1309,7 @@ extern "C" void app_main(void)
     }
     if (s_selected < 0) s_selected = 0;
     if (cached && !s_message[0]) snprintf(s_message, sizeof(s_message), "USING SAVED ORBITS");
+    s_message_until = esp_timer_get_time() + MESSAGE_US;
 
     if (xTaskCreatePinnedToCore(pass_task, "passes", 10240, NULL, 2, NULL, 0) != pdPASS) {
         ESP_LOGE(TAG, "Not enough memory for pass prediction");
