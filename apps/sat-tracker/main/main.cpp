@@ -25,6 +25,7 @@
 #include "cyd_platform.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -42,6 +43,11 @@ static const char *TAG = "sat_tracker";
 #define TLE_MAX_BYTES    (160 * 1024)
 #define TLE_MAX_AGE_S    (12 * 3600)  /* CelesTrak asks clients not to refetch more often than needed */
 #define MAX_SATS         220
+/*
+ * Each satellite needs about 1 KB for its SGP4 state. Stop loading while this much
+ * heap is still free, for the pass list, vectors, and the HTTP/display code.
+ */
+#define HEAP_RESERVE     (64 * 1024)
 #define PASS_HORIZON_S   (12 * 3600)
 #define MAX_PASSES       40
 #define ISS_CATNUM       25544
@@ -94,6 +100,7 @@ static int s_selected = -1;
 static int64_t s_exit_armed_until;
 static char s_message[64];
 static int s_scroll; /* first row shown on LIST and PASSES */
+static bool s_crashed; /* the previous run ended in a panic or watchdog reset */
 
 /* ---------- Small drawing helpers ---------- */
 
@@ -383,29 +390,14 @@ static int64_t tle_saved_at(void)
     return t;
 }
 
-static char *read_file(const char *path, size_t max)
-{
-    FILE *f = fopen(path, "r");
-    if (f == NULL) return NULL;
-    char *buf = (char *)malloc(max + 1);
-    size_t n = buf ? fread(buf, 1, max, f) : 0;
-    fclose(f);
-    if (buf == NULL || n == 0) {
-        free(buf);
-        return NULL;
-    }
-    buf[n] = '\0';
-    return buf;
-}
-
-static void save_tle_cache(const char *text)
+static bool save_tle_cache(const char *text)
 {
     char path[64];
     tle_cache_path(path, sizeof(path));
     mkdir(CYD_SD_MOUNT_POINT "/apps", 0775);
     mkdir(APP_DIR, 0775);
     FILE *f = fopen(path, "w");
-    if (f == NULL) return;
+    if (f == NULL) return false;
     bool ok = fputs(text, f) >= 0;
     fclose(f);
     nvs_handle_t h;
@@ -416,63 +408,118 @@ static void save_tle_cache(const char *text)
         nvs_commit(h);
         nvs_close(h);
     }
+    return ok;
 }
 
-/* Returns TLE text (heap) from the SD cache if fresh, else CelesTrak, else a stale cache. */
-static char *get_tles(bool *from_cache)
+/*
+ * Makes sure fresh TLEs are available. Prefers the SD card copy (and parsing it line by
+ * line, so the whole text never sits in memory next to the satellites). Returns the text
+ * in *text only when there is no usable SD copy; otherwise *text is NULL and the data is
+ * in the cache file. Returns false if there is no data at all.
+ */
+static bool get_tles(char **text, bool *from_cache)
 {
     char path[64];
     tle_cache_path(path, sizeof(path));
+    struct stat st;
+    bool have_cache = stat(path, &st) == 0 && st.st_size > 0;
     int64_t age = (int64_t)time(NULL) - tle_saved_at();
-    if (age >= 0 && age < TLE_MAX_AGE_S) {
-        char *text = read_file(path, TLE_MAX_BYTES);
-        if (text) {
-            *from_cache = true;
-            ESP_LOGI(TAG, "Using cached TLEs (%lld min old)", (long long)(age / 60));
-            return text;
-        }
+    *text = NULL;
+    if (have_cache && age >= 0 && age < TLE_MAX_AGE_S) {
+        *from_cache = true;
+        ESP_LOGI(TAG, "Using cached TLEs (%lld min old)", (long long)(age / 60));
+        return true;
     }
 
     char url[128];
     snprintf(url, sizeof(url), "https://celestrak.org/NORAD/elements/gp.php?GROUP=%s&FORMAT=tle", s_cfg.group);
-    char *text = NULL;
+    char *body = NULL;
     size_t len = 0;
-    esp_err_t err = net_get(url, TLE_MAX_BYTES, &text, &len);
-    if (err == ESP_OK && strstr(text, "\n1 ") != NULL) {
+    esp_err_t err = net_get(url, TLE_MAX_BYTES, &body, &len);
+    if (err == ESP_OK && strstr(body, "\n1 ") != NULL) {
         ESP_LOGI(TAG, "Downloaded %u bytes of TLEs", (unsigned)len);
-        save_tle_cache(text);
         *from_cache = false;
-        return text;
+        if (save_tle_cache(body)) {
+            free(body);
+            return true;
+        }
+        *text = body; /* no SD card: parse from memory */
+        return true;
     }
     ESP_LOGW(TAG, "TLE download failed (%s)", esp_err_to_name(err));
-    free(text);
+    free(body);
     *from_cache = true;
-    return read_file(path, TLE_MAX_BYTES);
+    return have_cache;
 }
 
-static int parse_tles(char *text)
+/* Adds one satellite unless memory is getting low. Returns false to stop loading. */
+static bool add_satellite(const char *name, const char *line1, const char *line2, int limit)
 {
-    std::vector<char *> lines;
-    for (char *save = NULL, *l = strtok_r(text, "\r\n", &save); l; l = strtok_r(NULL, "\r\n", &save)) {
-        lines.push_back(l);
+    if ((int)s_sats.size() >= limit) return false;
+    if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < HEAP_RESERVE + sizeof(satellite_t)) {
+        ESP_LOGW(TAG, "Stopping at %u satellites to keep %u KB of memory free", (unsigned)s_sats.size(),
+                 (unsigned)(HEAP_RESERVE / 1024));
+        return false;
     }
-    for (size_t i = 0; i + 1 < lines.size() && s_sats.size() < MAX_SATS; ++i) {
-        if (lines[i][0] != '1' || lines[i + 1][0] != '2') continue;
-        const char *name = (i > 0 && lines[i - 1][0] != '1' && lines[i - 1][0] != '2') ? lines[i - 1] : NULL;
-        satellite_t *sat = (satellite_t *)malloc(sizeof(satellite_t));
-        if (sat == NULL) {
-            ESP_LOGW(TAG, "Out of memory after %u satellites", (unsigned)s_sats.size());
-            break;
+    satellite_t *sat = (satellite_t *)malloc(sizeof(satellite_t));
+    if (sat == NULL) return false;
+    if (sat_parse_tle(name, line1, line2, sat)) {
+        entry_t e = {};
+        e.sat = sat;
+        s_sats.push_back(e);
+    } else {
+        free(sat);
+    }
+    return true;
+}
+
+static bool is_line(const char *l, char kind)
+{
+    return l[0] == kind && l[1] == ' ';
+}
+
+static void trim_eol(char *l)
+{
+    l[strcspn(l, "\r\n")] = '\0';
+}
+
+/* Reads "name / line 1 / line 2" triples (the name is optional) from text or the cache file. */
+static int load_satellites(char *text, int limit)
+{
+    s_sats.reserve(limit);
+    char prev[80] = "", l1[80] = "", cur[80];
+    if (text) {
+        char *save = NULL;
+        for (char *l = strtok_r(text, "\r\n", &save); l; l = strtok_r(NULL, "\r\n", &save)) {
+            snprintf(cur, sizeof(cur), "%s", l);
+            if (is_line(cur, '1')) {
+                snprintf(l1, sizeof(l1), "%s", cur);
+            } else if (is_line(cur, '2') && l1[0]) {
+                if (!add_satellite(prev[0] ? prev : NULL, l1, cur, limit)) break;
+                l1[0] = prev[0] = '\0';
+            } else {
+                snprintf(prev, sizeof(prev), "%s", cur);
+            }
         }
-        if (sat_parse_tle(name, lines[i], lines[i + 1], sat)) {
-            entry_t e = {};
-            e.sat = sat;
-            s_sats.push_back(e);
+        return (int)s_sats.size();
+    }
+    char path[64];
+    tle_cache_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return 0;
+    while (fgets(cur, sizeof(cur), f)) {
+        trim_eol(cur);
+        if (!cur[0]) continue;
+        if (is_line(cur, '1')) {
+            snprintf(l1, sizeof(l1), "%s", cur);
+        } else if (is_line(cur, '2') && l1[0]) {
+            if (!add_satellite(prev[0] ? prev : NULL, l1, cur, limit)) break;
+            l1[0] = prev[0] = '\0';
         } else {
-            free(sat);
+            snprintf(prev, sizeof(prev), "%s", cur);
         }
-        ++i;
     }
+    fclose(f);
     return (int)s_sats.size();
 }
 
@@ -502,12 +549,24 @@ static std::vector<int> visible_sorted(void)
 
 /* ---------- Pass prediction (background task) ---------- */
 
+static void sort_and_trim(std::vector<std::pair<int, pass_t>> &found)
+{
+    std::sort(found.begin(), found.end(),
+              [](const std::pair<int, pass_t> &a, const std::pair<int, pass_t> &b) { return a.second.rise < b.second.rise; });
+    if (found.size() > MAX_PASSES) found.resize(MAX_PASSES);
+}
+
 static void pass_task(void *arg)
 {
     satellite_t *copy = (satellite_t *)malloc(sizeof(satellite_t));
+    if (copy == NULL) {
+        ESP_LOGE(TAG, "Not enough memory for pass prediction");
+        vTaskDelete(NULL);
+    }
     for (;;) {
         time_t from = time(NULL);
         std::vector<std::pair<int, pass_t>> found;
+        found.reserve(2 * MAX_PASSES + 3);
         int n = (int)s_sats.size();
         for (int i = 0; i < n; ++i) {
             s_pass_progress = i * 100 / n;
@@ -523,11 +582,11 @@ static void pass_task(void *arg)
                 found.push_back({i, p});
                 t = p.set + 60;
             }
+            /* Keep only the earliest passes so memory use stays bounded. */
+            if (found.size() > 2 * MAX_PASSES) sort_and_trim(found);
             vTaskDelay(1); /* let the UI task run */
         }
-        std::sort(found.begin(), found.end(),
-                  [](const std::pair<int, pass_t> &a, const std::pair<int, pass_t> &b) { return a.second.rise < b.second.rise; });
-        if (found.size() > MAX_PASSES) found.resize(MAX_PASSES);
+        sort_and_trim(found);
 
         xSemaphoreTake(s_pass_lock, portMAX_DELAY);
         s_passes = found;
@@ -850,6 +909,9 @@ static void handle_tap(int x, int y, const std::vector<int> &up)
 
 extern "C" void app_main(void)
 {
+    esp_reset_reason_t reset = esp_reset_reason();
+    s_crashed = reset == ESP_RST_PANIC || reset == ESP_RST_TASK_WDT || reset == ESP_RST_INT_WDT || reset == ESP_RST_WDT;
+    if (s_crashed) ESP_LOGW(TAG, "Previous run crashed (reset reason %d)", (int)reset);
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -933,13 +995,22 @@ extern "C" void app_main(void)
     snprintf(line, sizeof(line), "CELESTRAK GROUP %.20s", s_cfg.group);
     show_status("LOADING ORBITS", line, NULL, CYD_CYAN);
     bool cached = false;
-    char *tles = get_tles(&cached);
+    char *tles = NULL;
+    bool have_tles = get_tles(&tles, &cached);
 
     /* Wi-Fi is no longer needed; its memory holds the satellite data instead. */
     net_wifi_stop();
-    if (tles == NULL) fatal("NO ORBIT DATA", "CELESTRAK DOWNLOAD FAILED", "AND NO COPY ON THE SD CARD");
+    if (!have_tles) fatal("NO ORBIT DATA", "CELESTRAK DOWNLOAD FAILED", "AND NO COPY ON THE SD CARD");
 
-    int count = parse_tles(tles);
+    /* After a crash, load fewer satellites so a memory problem cannot loop forever. */
+    int limit = MAX_SATS;
+    if (s_crashed) {
+        limit = 60;
+        snprintf(s_message, sizeof(s_message), "RESTARTED AFTER A CRASH: 60 SATELLITES");
+    }
+    ESP_LOGI(TAG, "Free heap before loading %u (largest block %u)", (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    int count = load_satellites(tles, limit);
     free(tles);
     if (count == 0) fatal("NO SATELLITES", "THE ORBIT DATA COULD NOT BE READ", NULL);
     ESP_LOGI(TAG, "%d satellites loaded (%s); free heap %u", count, cached ? "cache" : "download",
@@ -949,9 +1020,11 @@ extern "C" void app_main(void)
         if (s_sats[i].sat->catnum == ISS_CATNUM) s_selected = i;
     }
     if (s_selected < 0) s_selected = 0;
-    if (cached) snprintf(s_message, sizeof(s_message), "USING SAVED ORBITS");
+    if (cached && !s_message[0]) snprintf(s_message, sizeof(s_message), "USING SAVED ORBITS");
 
-    xTaskCreatePinnedToCore(pass_task, "passes", 8192, NULL, 2, NULL, 0);
+    if (xTaskCreatePinnedToCore(pass_task, "passes", 10240, NULL, 2, NULL, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Not enough memory for pass prediction");
+    }
 
     /* ---------- Main loop ---------- */
     std::vector<int> up;
