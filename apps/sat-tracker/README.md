@@ -6,7 +6,7 @@ Shows which satellites are above your location right now and when the next passe
 - **OVERHEAD** (LIST) — satellites above the horizon, highest first. Tap one to show it on the sky map.
 - **PASSES** (title *UPCOMING PASSES*) — passes in the next 12 hours that climb at least 10° (configurable), with local start time, peak elevation, duration, and direction. Passes in progress are green and marked NOW. They are computed in the background after start-up, which takes a while on the ESP32.
 
-Everything works by touch: the buttons at the bottom switch screens, ▲/▼ on the right page through long lists, and **EXIT** (two taps) returns to the launcher. Tap the header to cycle the **ALL**, **ISS**, and **FAV** filters. On SKY, tap **+FAV** next to the selected satellite to save or remove it from favorites; the filter and favorites persist across restarts. Passes starting within 10 minutes are highlighted as **SOON**. Holding the screen for 2 seconds also returns to the launcher, on every screen including start-up and errors. BOOT is an optional shortcut: short press switches screens, long press exits.
+Everything works by touch: the buttons at the bottom switch screens, **WEB** opens the settings page (below), ▲/▼ on the right page through long lists, and **EXIT** (two taps) returns to the launcher. Tap the header to cycle the **ALL**, **ISS**, and **FAV** filters. On SKY, tap **+FAV** next to the selected satellite to save or remove it from favorites; the filter and favorites persist across restarts. Passes starting within 10 minutes are highlighted as **SOON**. Holding the screen for 2 seconds also returns to the launcher, on every screen including start-up and errors. BOOT is an optional shortcut: short press switches screens, long press exits.
 
 The header shows the local time and the place name. For 15 seconds after start-up a short notice can replace the place name, such as `USING SAVED ORBITS` (the data came from the SD card) or `CRASH: 60 SATELLITES` (see below).
 
@@ -21,12 +21,28 @@ The header shows the local time and the place name. For 15 seconds after start-u
 
 Positions agree with [Skyfield](https://rhodesmill.org/skyfield/) to about 0.001° and pass times to about a second (checked on a computer with the same code). Whether a pass is visible to the eye (sunlit satellite, dark sky) is not computed yet.
 
+## Settings page
+
+**WEB** restarts Satellites in setup mode. It connects to Wi-Fi, loads no satellites, and shows an address such as `http://192.168.1.50`. Open it in a browser on the same network to change:
+
+- the CelesTrak group (brightest, space stations, amateur radio, weather, GPS, any other group by name) and the minimum elevation for passes;
+- the location: the launcher's, or one used only by Satellites (town search or coordinates);
+- the time zone: automatic, or a fixed offset;
+- what the device shows: all satellites, the ISS only, or favorites only;
+- favorites, picked from the satellites in the saved orbit data;
+- *Download fresh orbit data on the next start*, which skips the 12-hour reuse once.
+
+**Save** stores the settings and restarts Satellites with them. **BACK** on the screen restarts it without changes. Holding the screen for 2 seconds returns to the launcher.
+
+Setup mode exists because Wi-Fi needs about as much memory as 40 satellites. Satellites are not tracked while the page is open.
+
 ## Troubleshooting
 
 | On screen | Meaning and what to do |
 |-----------|------------------------|
 | `NO WI-FI` | No Wi-Fi saved in the launcher. Put `wifi.json` on the SD card and start the launcher once. |
 | `WI-FI FAILED` | The saved network did not connect within 20 seconds. |
+| `SETTINGS FAILED` | The settings page could not start (no network address). Tap to leave and try again. |
 | `NO TIME` | Neither NTP nor a web server gave the time. |
 | `NO LOCATION` | No location from any source. Set it in the launcher: **GET APPS**, then the web page shown on the screen. |
 | `NO ORBIT DATA` | The download failed and there is no copy on the SD card. CelesTrak may be blocking repeated downloads; wait a few hours. |
@@ -36,7 +52,9 @@ Positions agree with [Skyfield](https://rhodesmill.org/skyfield/) to about 0.001
 
 On the error screens (all but the last two rows), a tap returns to the launcher. The serial log (115200 baud) has the details, for example `Free heap before loading`, `N satellites loaded`, `SGP4 error`, and `N passes in the next 12 h (took N s)`.
 
-## Settings: `/apps/sat-tracker/config.json` on the SD card (optional)
+## Settings file: `/apps/sat-tracker/config.json` on the SD card (optional)
+
+The settings page writes this file; you can also edit it by hand.
 
 ```json
 {

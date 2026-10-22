@@ -68,6 +68,7 @@ Then use `otatool.py switch_ota_partition --slot 0` from ESP-IDF, or open the ap
 - [ ] Satellites: holding the screen for 2 seconds returns to the launcher on the start-up screens and on errors.
 - [ ] Satellites: restarting within 2 hours of a download logs `Last download attempt ... using the saved copy` and does not contact CelesTrak.
 - [ ] Satellites: start-up notices appear in the header and disappear after 15 seconds; N and S labels are not covered.
+- [ ] Satellites: WEB shows an address; the page loads, Save writes `config.json` and restarts with the new settings, BACK restarts unchanged.
 - [ ] GET APPS lists the catalog with NEW / UPDATE / INSTALLED and downloads an app to the SD card.
 - [ ] The web page at the shown address loads, adds and removes a repository, and starts a download.
 - [ ] An app from a user repository shows the GITHUB badge in the main list and runs.
