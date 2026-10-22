@@ -57,6 +57,17 @@ While GET APPS is open, the launcher serves a small page on port 80 and shows it
 - The binary is downloaded to `/apps/<id>/app.bin.part`, its size and SHA-256 are checked, then it replaces `app.bin`.
 - `manifest.json` is written with the verified SHA-256 and a `source` field (`official` or `github:owner/name`). The launcher's app list shows unreviewed apps with a **GITHUB** badge.
 
+## Update (2026-10-21): publishing apps without a platform release
+
+Apps change more often than the launcher, so the catalog moved out of the platform releases:
+
+- A rolling prerelease with the tag `apps` holds `catalog.json` and `app-<id>-<version>.bin`. Being a prerelease, it never becomes GitHub's "latest release", which the launcher's self-update uses. Its tag sits on the root commit.
+- The **Publish apps** workflow runs after every successful build of `main`. It compares each app's manifest version with the published catalog, uploads new versions, replaces `catalog.json`, and deletes binaries that neither the new nor the previous catalog references. It can also be run by hand, optionally republishing everything.
+- The launcher reads `releases/download/apps/catalog.json` and falls back to the latest platform release's catalog if the `apps` release does not exist yet.
+- The launcher's version comes from `git describe --match "v[0-9]*"`, so the `apps` tag can never become its version.
+
+To ship an app change: bump `version` in its `manifest.json` and merge. Devices see the update in GET APPS a few minutes later.
+
 ## Consequences
 
 - Apps can be installed and updated without removing the SD card.

@@ -18,7 +18,9 @@
 #include "nvs.h"
 
 #define APPS_DIR        CYD_SD_MOUNT_POINT "/apps"
-#define CATALOG_URL     "https://github.com/" CONFIG_CYD_UPDATE_REPO "/releases/latest/download/catalog.json"
+/* Apps are published continuously to the "apps" release; platform releases carry a copy. */
+#define CATALOG_URL     "https://github.com/" CONFIG_CYD_UPDATE_REPO "/releases/download/apps/catalog.json"
+#define CATALOG_URL_OLD "https://github.com/" CONFIG_CYD_UPDATE_REPO "/releases/latest/download/catalog.json"
 #define CATALOG_MAX     12288
 #define APP_JSON_MAX    2048
 #define NVS_NAMESPACE   "cyd_store"
@@ -243,7 +245,12 @@ static void note_error(store_list_t *list, const char *what)
 
 static void load_catalog(store_list_t *list, char *buf)
 {
-    if (http_get_text(CATALOG_URL, buf, CATALOG_MAX) != ESP_OK) {
+    esp_err_t err = http_get_text(CATALOG_URL, buf, CATALOG_MAX);
+    if (err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "No apps release yet; using the catalog of the latest platform release");
+        err = http_get_text(CATALOG_URL_OLD, buf, CATALOG_MAX);
+    }
+    if (err != ESP_OK) {
         note_error(list, "CATALOG");
         return;
     }
