@@ -53,6 +53,8 @@ static const char *TAG = "sat_tracker";
 #define PASS_HORIZON_S   (12 * 3600)
 #define MAX_PASSES       40
 #define ISS_CATNUM       25544
+#define IMMINENT_PASS_S  (10 * 60)
+#define SKY_FRAME_US     200000
 #define LONG_PRESS_US    700000
 
 /* ---------- Layout ---------- */
@@ -70,6 +72,7 @@ static const char *TAG = "sat_tracker";
 #define SCROLL_W   30   /* touch scroll buttons beside long lists */
 
 enum screen_t { SCREEN_SKY, SCREEN_LIST, SCREEN_PASSES };
+enum filter_t { FILTER_ALL, FILTER_ISS, FILTER_FAVORITES, FILTER_COUNT };
 
 /* ---------- State ---------- */
 
@@ -85,7 +88,9 @@ struct config_t {
 struct entry_t {
     satellite_t *sat;
     look_t look;
+    look_t previous_look;
     bool valid;
+    bool previous_valid;
     bool reloaded;  /* re-read from the SD card once after an SGP4 error */
     int8_t error;   /* last SGP4 error code, 0 if none */
     long offset;    /* position of line 1 in the cache file, -1 if not from the file */
@@ -93,6 +98,7 @@ struct entry_t {
 
 static config_t s_cfg;
 static std::vector<entry_t> s_sats;
+static int64_t s_position_sample_us;
 static SemaphoreHandle_t s_sat_lock;   /* guards sgp4 state of each satellite */
 
 static SemaphoreHandle_t s_pass_lock;  /* guards s_passes */
@@ -108,11 +114,14 @@ static int64_t s_message_until; /* the message replaces the place name in the he
 #define MESSAGE_US 15000000
 static int s_scroll; /* first row shown on LIST and PASSES */
 static bool s_crashed; /* the previous run ended in a panic or watchdog reset */
+static filter_t s_filter = FILTER_ALL;
+static std::vector<int> s_favorite_ids;
 
 /* ---------- Small drawing helpers ---------- */
 
 static void pixel(cyd_canvas_t *c, int x, int y, uint16_t color)
 {
+    if (x < 0 || x >= CYD_LCD_H_RES || y < c->y0 || y >= c->y0 + c->h) return;
     cyd_fill_rect(c, x, y, 1, 1, color);
 }
 
@@ -149,6 +158,20 @@ static void text_center(cyd_canvas_t *c, const char *text, int y, int scale, uin
     cyd_draw_text(c, text, (CYD_LCD_H_RES - cyd_text_width(text, scale)) / 2, y, scale, color);
 }
 
+static void draw_metric_card(cyd_canvas_t *c, int x, int y, int w, const char *label,
+                             const char *value, uint16_t accent)
+{
+    cyd_fill_rect(c, x, y, w, 34, CYD_RGB(20, 29, 43));
+    cyd_fill_rect(c, x, y, 2, 34, accent);
+    cyd_draw_text(c, label, x + 6, y + 3, 1, CYD_GREY);
+    text_clipped(c, value, x + 6, y + 17, 1, w - 9, CYD_WHITE);
+}
+
+static void format_distance(double km, char *out, size_t len)
+{
+    snprintf(out, len, "%.0f", km);
+}
+
 static const char *compass(double az)
 {
     static const char *names[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
@@ -162,6 +185,73 @@ static void local_hhmm(time_t utc, char *out, size_t len, bool seconds)
     gmtime_r(&local, &tm);
     if (seconds) snprintf(out, len, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
     else snprintf(out, len, "%02d:%02d", tm.tm_hour, tm.tm_min);
+}
+
+static bool is_favorite(int catnum)
+{
+    return std::find(s_favorite_ids.begin(), s_favorite_ids.end(), catnum) != s_favorite_ids.end();
+}
+
+static bool matches_filter(int sat_index)
+{
+    if (sat_index < 0 || sat_index >= (int)s_sats.size()) return false;
+    if (s_filter == FILTER_ISS) return s_sats[sat_index].sat->catnum == ISS_CATNUM;
+    if (s_filter == FILTER_FAVORITES) return is_favorite(s_sats[sat_index].sat->catnum);
+    return true;
+}
+
+static const char *filter_name(void)
+{
+    static const char *names[] = {"ALL", "ISS", "FAV"};
+    return names[s_filter];
+}
+
+static void load_ui_preferences(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t filter = FILTER_ALL;
+    if (nvs_get_u8(h, "sat_filter", &filter) == ESP_OK && filter < FILTER_COUNT) s_filter = (filter_t)filter;
+    char csv[3072];
+    size_t len = sizeof(csv);
+    if (nvs_get_str(h, "favorites", csv, &len) == ESP_OK) {
+        char *p = csv;
+        while (*p) {
+            char *end = NULL;
+            long id = strtol(p, &end, 10);
+            if (end == p) break;
+            if (id > 0 && id <= 999999 && !is_favorite((int)id)) s_favorite_ids.push_back((int)id);
+            p = (*end == ',') ? end + 1 : end;
+        }
+    }
+    nvs_close(h);
+}
+
+static void save_ui_preferences(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "sat_filter", (uint8_t)s_filter);
+    char csv[3072] = "";
+    size_t used = 0;
+    for (int id : s_favorite_ids) {
+        int n = snprintf(csv + used, sizeof(csv) - used, "%s%d", used ? "," : "", id);
+        if (n < 0 || (size_t)n >= sizeof(csv) - used) break;
+        used += (size_t)n;
+    }
+    nvs_set_str(h, "favorites", csv);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void toggle_selected_favorite(void)
+{
+    if (s_selected < 0 || s_selected >= (int)s_sats.size()) return;
+    int catnum = s_sats[s_selected].sat->catnum;
+    auto it = std::find(s_favorite_ids.begin(), s_favorite_ids.end(), catnum);
+    if (it == s_favorite_ids.end()) s_favorite_ids.push_back(catnum);
+    else s_favorite_ids.erase(it);
+    save_ui_preferences();
 }
 
 /* ---------- Status screen (startup and errors) ---------- */
@@ -636,6 +726,8 @@ static void update_positions(void)
     time_t now = time(NULL);
     double jd = sat_jd(now, 0);
     for (auto &e : s_sats) {
+        e.previous_look = e.look;
+        e.previous_valid = e.valid;
         xSemaphoreTake(s_sat_lock, portMAX_DELAY);
         e.valid = sat_look(e.sat, &s_cfg.obs, jd, &e.look);
         e.error = (int8_t)e.sat->rec.error;
@@ -654,6 +746,7 @@ static void update_positions(void)
             }
         }
     }
+    s_position_sample_us = esp_timer_get_time();
 }
 
 /* Indices of satellites above the horizon, highest first. */
@@ -661,7 +754,7 @@ static std::vector<int> visible_sorted(void)
 {
     std::vector<int> v;
     for (int i = 0; i < (int)s_sats.size(); ++i) {
-        if (s_sats[i].valid && s_sats[i].look.el_deg > 0) v.push_back(i);
+        if (matches_filter(i) && s_sats[i].valid && s_sats[i].look.el_deg > 0) v.push_back(i);
     }
     std::sort(v.begin(), v.end(), [](int a, int b) { return s_sats[a].look.el_deg > s_sats[b].look.el_deg; });
     return v;
@@ -736,6 +829,26 @@ static void sky_point(double az, double el, int *x, int *y)
     *y = SKY_CY - (int)lround(d * cos(az * M_PI / 180.0));
 }
 
+static look_t display_look(int i)
+{
+    const entry_t &e = s_sats[i];
+    if (!e.previous_valid || !e.valid) return e.look;
+    double t = (esp_timer_get_time() - s_position_sample_us) / 1000000.0;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    look_t l = e.look;
+    double az_delta = fmod(e.look.az_deg - e.previous_look.az_deg + 540.0, 360.0) - 180.0;
+    l.az_deg = e.previous_look.az_deg + az_delta * t;
+    if (l.az_deg < 0) l.az_deg += 360.0;
+    if (l.az_deg >= 360.0) l.az_deg -= 360.0;
+    l.el_deg = e.previous_look.el_deg + (e.look.el_deg - e.previous_look.el_deg) * t;
+    if (l.el_deg < 0) l.el_deg = 0;
+    if (l.el_deg > 90) l.el_deg = 90;
+    l.range_km = e.previous_look.range_km + (e.look.range_km - e.previous_look.range_km) * t;
+    l.alt_km = e.previous_look.alt_km + (e.look.alt_km - e.previous_look.alt_km) * t;
+    return l;
+}
+
 static uint16_t el_color(double el)
 {
     return el >= 45 ? CYD_GREEN : (el >= 15 ? CYD_CYAN : CYD_GREY);
@@ -763,20 +876,22 @@ static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
 
     for (int i : up) {
         if (i == s_selected) continue;
+        look_t look = display_look(i);
         int x, y;
-        sky_point(s_sats[i].look.az_deg, s_sats[i].look.el_deg, &x, &y);
+        sky_point(look.az_deg, look.el_deg, &x, &y);
         bool iss = s_sats[i].sat->catnum == ISS_CATNUM;
         int r = iss ? 3 : 1;
-        cyd_fill_rect(c, x - r, y - r, 2 * r + 1, 2 * r + 1, iss ? CYD_WHITE : el_color(s_sats[i].look.el_deg));
+        cyd_fill_rect(c, x - r, y - r, 2 * r + 1, 2 * r + 1, iss ? CYD_WHITE : el_color(look.el_deg));
     }
     if (s_selected >= 0 && s_sats[s_selected].valid && s_sats[s_selected].look.el_deg > 0) {
+        look_t look = display_look(s_selected);
         int x, y;
-        sky_point(s_sats[s_selected].look.az_deg, s_sats[s_selected].look.el_deg, &x, &y);
+        sky_point(look.az_deg, look.el_deg, &x, &y);
         cyd_fill_rect(c, x - 3, y - 3, 7, 7, CYD_AMBER);
         circle(c, x, y, 6, CYD_AMBER);
     }
 
-    /* Right panel: count and the selected satellite. */
+    /* Right panel: count and compact, readable metrics for the selection. */
     char buf[40];
     snprintf(buf, sizeof(buf), "%d UP", (int)up.size());
     cyd_draw_text(c, buf, PANEL_X, 42, 2, CYD_WHITE);
@@ -785,10 +900,13 @@ static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
 
     if (s_selected < 0) return;
     const entry_t &e = s_sats[s_selected];
+    int panel_w = CYD_LCD_H_RES - PANEL_X - 4;
     int y = 82;
-    cyd_fill_rect(c, PANEL_X, y, CYD_LCD_H_RES - PANEL_X - 4, 1, CYD_PANEL);
+    cyd_fill_rect(c, PANEL_X, y, panel_w, 1, CYD_PANEL);
     y += 6;
-    text_clipped(c, e.sat->name, PANEL_X, y, 1, CYD_LCD_H_RES - PANEL_X - 4, CYD_AMBER);
+    text_clipped(c, e.sat->name, PANEL_X, y, 1, panel_w - 30, CYD_AMBER);
+    text_right(c, is_favorite(e.sat->catnum) ? "FAV" : "+FAV", PANEL_X + panel_w, y, 1,
+               is_favorite(e.sat->catnum) ? CYD_AMBER : CYD_GREY);
     y += 14;
     if (!e.valid) {
         cyd_draw_text(c, "NO POSITION", PANEL_X, y, 1, CYD_RED);
@@ -799,37 +917,41 @@ static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
         cyd_draw_text(c, buf, PANEL_X, y + 24, 1, CYD_GREY);
         return;
     }
+    char first_value[20] = "--";
+    char second_value[20] = "--";
+    uint16_t first_color = CYD_GREEN;
+    uint16_t second_color = CYD_CYAN;
+    const char *first_label = "ELEV";
+    const char *second_label = "AZ";
     if (e.look.el_deg > 0) {
-        snprintf(buf, sizeof(buf), "EL %.0f", e.look.el_deg);
-        cyd_draw_text(c, buf, PANEL_X, y, 2, CYD_GREEN);
-        y += 20;
-        snprintf(buf, sizeof(buf), "AZ %.0f %s", e.look.az_deg, compass(e.look.az_deg));
-        cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_WHITE);
-        y += 12;
+        snprintf(first_value, sizeof(first_value), "%.0f deg", e.look.el_deg);
+        snprintf(second_value, sizeof(second_value), "%.0f %s", e.look.az_deg, compass(e.look.az_deg));
     } else {
-        cyd_draw_text(c, "BELOW HORIZON", PANEL_X, y, 1, CYD_GREY);
-        y += 12;
+        first_label = "NEXT";
+        second_label = "MAX EL";
+        first_color = second_color = CYD_CYAN;
         xSemaphoreTake(s_pass_lock, portMAX_DELAY);
         for (auto &p : s_passes) {
             if (p.first == s_selected) {
                 char t[8];
                 local_hhmm(p.second.rise, t, sizeof(t), false);
-                snprintf(buf, sizeof(buf), "NEXT %s", t);
-                cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_CYAN);
-                y += 12;
-                snprintf(buf, sizeof(buf), "MAX EL %.0f", p.second.max_el_deg);
-                cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_CYAN);
-                y += 12;
+                snprintf(first_value, sizeof(first_value), "%s", t);
+                snprintf(second_value, sizeof(second_value), "%.0f deg", p.second.max_el_deg);
+                time_t now = time(NULL);
+                if (p.second.rise >= now && p.second.rise - now <= IMMINENT_PASS_S) first_color = CYD_AMBER;
                 break;
             }
         }
         xSemaphoreGive(s_pass_lock);
     }
-    snprintf(buf, sizeof(buf), "RANGE %.0f KM", e.look.range_km);
-    cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_GREY);
-    y += 12;
-    snprintf(buf, sizeof(buf), "ALT %.0f KM", e.look.alt_km);
-    cyd_draw_text(c, buf, PANEL_X, y, 1, CYD_GREY);
+    char range[20], altitude[20];
+    format_distance(e.look.range_km, range, sizeof(range));
+    format_distance(e.look.alt_km, altitude, sizeof(altitude));
+    int gap = 4, card_w = (panel_w - gap) / 2;
+    draw_metric_card(c, PANEL_X, y, card_w, first_label, first_value, first_color);
+    draw_metric_card(c, PANEL_X + card_w + gap, y, card_w, second_label, second_value, second_color);
+    draw_metric_card(c, PANEL_X, y + 38, card_w, "RNG KM", range, CYD_GREY);
+    draw_metric_card(c, PANEL_X + card_w + gap, y + 38, card_w, "ALT KM", altitude, CYD_GREY);
 }
 
 /* Upcoming or current passes (the background list also holds ones that ended). */
@@ -840,7 +962,9 @@ static std::vector<std::pair<int, pass_t>> current_passes(void)
     xSemaphoreGive(s_pass_lock);
     time_t now = time(NULL);
     passes.erase(std::remove_if(passes.begin(), passes.end(),
-                                [now](const std::pair<int, pass_t> &p) { return p.second.set < now; }),
+                                [now](const std::pair<int, pass_t> &p) {
+                                    return p.second.set < now || !matches_filter(p.first);
+                                }),
                  passes.end());
     return passes;
 }
@@ -874,6 +998,15 @@ static void draw_scroll_buttons(cyd_canvas_t *c, int count)
     draw_arrow(c, x + SCROLL_W / 2, ROW_Y0 + h + 4 + h / 2, false, s_scroll < count - ROWS ? CYD_WHITE : CYD_GREY);
 }
 
+static void draw_row_card(cyd_canvas_t *c, int right, int y, bool selected, uint16_t status_accent)
+{
+    uint16_t bg = selected ? CYD_RGB(20, 54, 68) : CYD_RGB(20, 29, 43);
+    cyd_fill_rect(c, 4, y, right - 4, ROW_H - 3, bg);
+    cyd_fill_rect(c, 4, y, 2, ROW_H - 3,
+                  status_accent != CYD_PANEL ? status_accent : (selected ? CYD_CYAN : CYD_PANEL));
+    if (selected) cyd_fill_rect(c, 6, y, right - 6, 1, CYD_CYAN);
+}
+
 /* Returns -1/+1 when the tap hit a scroll button, else 0. */
 static int scroll_button_at(int x, int y, int count)
 {
@@ -893,14 +1026,14 @@ static void draw_list(cyd_canvas_t *c, const std::vector<int> &up)
         const entry_t &e = s_sats[idx];
         int y = ROW_Y0 + row * ROW_H;
         bool sel = idx == s_selected;
-        cyd_fill_rect(c, 4, y, right - 4, ROW_H - 3, sel ? CYD_AMBER : CYD_PANEL);
-        uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
-        text_clipped(c, e.sat->name, 10, y + 4, 2, right - 150, fg);
+        draw_row_card(c, right, y, sel, CYD_PANEL);
+        uint16_t fg = CYD_WHITE;
+        text_clipped(c, e.sat->name, 10, y + 3, 1, right - 150, fg);
         char buf[32];
         snprintf(buf, sizeof(buf), "EL %2.0f %s", e.look.el_deg, compass(e.look.az_deg));
-        text_right(c, buf, right - 6, y + 3, 1, sel ? CYD_BLACK : el_color(e.look.el_deg));
+        text_right(c, buf, right - 6, y + 2, 1, el_color(e.look.el_deg));
         snprintf(buf, sizeof(buf), "%.0f KM", e.look.range_km);
-        text_right(c, buf, right - 6, y + 12, 1, sel ? CYD_BLACK : CYD_GREY);
+        text_clipped(c, buf, 10, y + 12, 1, right - 20, sel ? CYD_CYAN : CYD_GREY);
     }
     draw_scroll_buttons(c, (int)up.size());
 }
@@ -923,16 +1056,18 @@ static void draw_passes(cyd_canvas_t *c)
         int idx = passes[first + row].first;
         int y = ROW_Y0 + row * ROW_H;
         bool now_up = p.rise <= now && now <= p.set;
+        bool soon = !now_up && p.rise >= now && p.rise - now <= IMMINENT_PASS_S;
         bool sel = idx == s_selected;
-        cyd_fill_rect(c, 4, y, right - 4, ROW_H - 3, sel ? CYD_AMBER : (now_up ? CYD_RGB(10, 60, 30) : CYD_PANEL));
-        uint16_t fg = sel ? CYD_BLACK : CYD_WHITE;
+        draw_row_card(c, right, y, sel, now_up ? CYD_GREEN : (soon ? CYD_AMBER : CYD_PANEL));
+        uint16_t fg = CYD_WHITE;
         char t[8], buf[48];
         local_hhmm(p.rise, t, sizeof(t), false);
-        cyd_draw_text(c, now_up ? "NOW" : t, 10, y + 4, 2, sel ? CYD_BLACK : (now_up ? CYD_GREEN : CYD_CYAN));
-        text_clipped(c, s_sats[idx].sat->name, 78, y + 3, 1, right - 84, fg);
+        const char *when = now_up ? "NOW" : (soon ? "SOON" : t);
+        cyd_draw_text(c, when, 10, y + 2, 1, now_up ? CYD_GREEN : (soon ? CYD_AMBER : CYD_CYAN));
+        text_clipped(c, s_sats[idx].sat->name, 48, y + 2, 1, right - 54, fg);
         snprintf(buf, sizeof(buf), "MAX %.0f  %d MIN  %s>%s", p.max_el_deg, (int)((p.set - p.rise + 30) / 60),
                  compass(p.rise_az_deg), compass(p.set_az_deg));
-        text_clipped(c, buf, 78, y + 12, 1, right - 84, sel ? CYD_BLACK : CYD_GREY);
+        text_clipped(c, buf, 10, y + 12, 1, right - 20, CYD_GREY);
     }
     draw_scroll_buttons(c, (int)passes.size());
 }
@@ -955,7 +1090,7 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     cyd_fill_rect(c, 0, 0, 3, HEADER_H - 2, CYD_CYAN);
     cyd_fill_rect(c, 3, HEADER_H - 2, CYD_LCD_H_RES - 3, 2, CYD_CYAN);
     const char *titles[] = {"SKY RADAR", "OVERHEAD", "UPCOMING PASSES"};
-    cyd_draw_text(c, titles[s_screen], 10, 8, 2, CYD_WHITE);
+    cyd_draw_text(c, titles[s_screen], 10, 4, 2, CYD_WHITE);
     char clock[12];
     local_hhmm(time(NULL), clock, sizeof(clock), true);
     text_right(c, clock, CYD_LCD_H_RES - 8, 5, 1, CYD_CYAN);
@@ -967,6 +1102,9 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
         snprintf(place, sizeof(place), "%.20s", s_cfg.place);
         text_right(c, place, CYD_LCD_H_RES - 8, 18, 1, CYD_GREY);
     }
+    char filter[24];
+    snprintf(filter, sizeof(filter), "%s %d SAVED", filter_name(), (int)s_favorite_ids.size());
+    cyd_draw_text(c, filter, 10, 22, 1, CYD_CYAN);
 
     if (s_screen == SCREEN_SKY) draw_sky(c, up);
     else if (s_screen == SCREEN_LIST) draw_list(c, up);
@@ -1006,6 +1144,14 @@ static void handle_tap(int x, int y, const std::vector<int> &up)
         }
         return;
     }
+    if (y < HEADER_H) {
+        s_filter = (filter_t)((s_filter + 1) % FILTER_COUNT);
+        s_scroll = 0;
+        save_ui_preferences();
+        snprintf(s_message, sizeof(s_message), "FILTER %s", filter_name());
+        s_message_until = esp_timer_get_time() + 3000000; /* shown in the header briefly */
+        return;
+    }
     if (y < ROW_Y0) return;
     int row = (y - ROW_Y0) / ROW_H;
     if (s_screen == SCREEN_LIST) {
@@ -1027,6 +1173,8 @@ static void handle_tap(int x, int y, const std::vector<int> &up)
             s_selected = passes[s_scroll + row].first;
             s_screen = SCREEN_SKY;
         }
+    } else if (s_screen == SCREEN_SKY && x >= PANEL_X && y >= 86 && y < 102) {
+        toggle_selected_favorite();
     } else if (s_screen == SCREEN_SKY && x < PANEL_X - 8) {
         /* Select the satellite nearest to the tap on the sky map. */
         int best = -1, best_d = 18 * 18;
@@ -1056,6 +1204,7 @@ extern "C" void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    load_ui_preferences();
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_touch_init());
     ESP_ERROR_CHECK(cyd_button_init());
@@ -1170,7 +1319,7 @@ extern "C" void app_main(void)
 
     /* ---------- Main loop ---------- */
     std::vector<int> up;
-    int64_t last_update = 0, button_since = -1;
+    int64_t last_update = 0, last_render = 0, button_since = -1;
     for (;;) {
         int64_t now = esp_timer_get_time();
         bool dirty = false;
@@ -1185,6 +1334,7 @@ extern "C" void app_main(void)
         tap_t tap;
         while (xQueueReceive(s_taps, &tap, 0) == pdTRUE) {
             handle_tap(tap.x, tap.y, up);
+            up = visible_sorted();
             dirty = true;
         }
 
@@ -1198,7 +1348,11 @@ extern "C" void app_main(void)
             dirty = true;
         }
 
-        if (dirty) cyd_display_render(draw_screen, &up);
+        if (s_screen == SCREEN_SKY && now - last_render >= SKY_FRAME_US) dirty = true;
+        if (dirty) {
+            last_render = now;
+            cyd_display_render(draw_screen, &up);
+        }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
