@@ -9,4 +9,4 @@ Apps are complete ESP32 firmware images that the launcher installs into the `ota
 
 Each app folder contains a `manifest.json`. ESP-IDF apps are built by `tools/build.sh`; apps with a `platformio.ini` are Arduino apps built by `tools/build-pio-app.sh` with the PlatformIO env named in the manifest (`platformio_env`). Both write `dist/sd/apps/<id>/` with `app.bin` and a manifest that includes the SHA-256, and `tools/package.py` adds them to the release catalog.
 
-When you change an app, bump `version` in its `manifest.json`: the launcher offers an update only when the catalog version differs from the installed one. The Release workflow warns about apps that changed without a version bump (`tools/check_app_versions.py`).
+When you change an app, bump `version` in its `manifest.json`: the launcher offers an update only when the catalog version differs from the installed one. After the change is merged, the **Publish apps** workflow publishes it to devices without a platform release. The Release workflow warns about apps that changed without a version bump (`tools/check_app_versions.py`).

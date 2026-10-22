@@ -54,6 +54,10 @@ The installed app is removed during an update and is reinstalled from the SD car
 
 To build locally, activate ESP-IDF v5.4 and run `./tools/build.sh`. See [docs/development.md](docs/development.md).
 
+## Publishing app updates
+
+App updates do not need a platform release. Bump `version` in the app's `manifest.json` and merge to `main`; after the build, the **Publish apps** workflow uploads the new build to the `apps` release and updates its `catalog.json`, and GET APPS offers the update. See [ADR 0004](docs/adr/0004-app-catalog.md).
+
 ## Making a release
 
 Open **Actions → Release → Run workflow**, pick which part of the version to increase (`patch`, `minor`, or `major`), and run it. The workflow tags the current `main` (for example `v0.2.0` → `v0.3.0`), builds the firmware with that version, checks that the built launcher reports it, and publishes a release with `cyd-launcher-full.bin` (USB flashing), `cyd-launcher.bin` and `cyd-launcher.json` (Wi-Fi self-update), `catalog.json` and `app-<id>.bin` (GET APPS), `cyd-sd-card.zip`, and `SHA256SUMS`. You can also enter an exact version instead.

@@ -1,0 +1,60 @@
+name: Publish apps
+
+# Publishes apps whose version changed to the rolling "apps" release, so app updates
+# reach devices without a platform release. Uses the build that just ran on main.
+on:
+  workflow_run:
+    workflows: ["Build CYD App Platform"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Republish every app, even if its version did not change
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-apps
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish changed apps
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Find the build to publish
+        id: run
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml --branch main --event push \
+              --status success --limit 1 --json databaseId,headSha \
+              --jq '.[0] | "id=\(.databaseId)\nsha=\(.headSha)"' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.run.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: cyd-app-platform
+          path: dist
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish
+        run: python3 tools/publish_apps.py dist ${{ inputs.force && '--force' || '' }}
