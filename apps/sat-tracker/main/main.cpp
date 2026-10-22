@@ -741,11 +741,19 @@ static uint16_t el_color(double el)
 
 static void draw_sky(cyd_canvas_t *c, const std::vector<int> &up)
 {
-    circle(c, SKY_CX, SKY_CY, SKY_R, CYD_GREY);
+    /* Low-contrast radar grid keeps the satellites as the visual focus. */
+    circle(c, SKY_CX, SKY_CY, SKY_R, CYD_CYAN);
     circle(c, SKY_CX, SKY_CY, SKY_R * 2 / 3, CYD_PANEL);
     circle(c, SKY_CX, SKY_CY, SKY_R / 3, CYD_PANEL);
     cyd_fill_rect(c, SKY_CX, SKY_CY - SKY_R, 1, 2 * SKY_R, CYD_PANEL);
     cyd_fill_rect(c, SKY_CX - SKY_R, SKY_CY, 2 * SKY_R, 1, CYD_PANEL);
+    /* Eight subtle tick marks around the horizon. */
+    for (int a = 0; a < 360; a += 45) {
+        double rad = a * M_PI / 180.0;
+        int x = SKY_CX + (int)lround((SKY_R - 1) * sin(rad));
+        int y = SKY_CY - (int)lround((SKY_R - 1) * cos(rad));
+        pixel(c, x, y, CYD_GREY);
+    }
     cyd_draw_text(c, "N", SKY_CX - 2, SKY_CY - SKY_R - 9, 1, CYD_WHITE);
     cyd_draw_text(c, "S", SKY_CX - 2, SKY_CY + SKY_R + 3, 1, CYD_GREY);
     cyd_draw_text(c, "E", SKY_CX + SKY_R + 4, SKY_CY - 3, 1, CYD_GREY);
@@ -940,14 +948,15 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
     const std::vector<int> &up = *(const std::vector<int> *)ctx;
     cyd_fill(c, CYD_DARK);
 
-    /* Header: screen title, local time, place. */
-    cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, HEADER_H - 2, CYD_PANEL);
-    cyd_fill_rect(c, 0, HEADER_H - 2, CYD_LCD_H_RES, 2, CYD_CYAN);
-    const char *titles[] = {"SKY", "OVERHEAD", "PASSES"};
-    cyd_draw_text(c, titles[s_screen], 10, 9, 2, CYD_WHITE);
+    /* Header: compact instrument-style title, live clock and observer location. */
+    cyd_fill_rect(c, 0, 0, CYD_LCD_H_RES, HEADER_H - 2, CYD_RGB(13, 23, 37));
+    cyd_fill_rect(c, 0, 0, 3, HEADER_H - 2, CYD_CYAN);
+    cyd_fill_rect(c, 3, HEADER_H - 2, CYD_LCD_H_RES - 3, 2, CYD_CYAN);
+    const char *titles[] = {"SKY RADAR", "OVERHEAD", "UPCOMING PASSES"};
+    cyd_draw_text(c, titles[s_screen], 10, 8, 2, CYD_WHITE);
     char clock[12];
     local_hhmm(time(NULL), clock, sizeof(clock), true);
-    text_right(c, clock, CYD_LCD_H_RES - 8, 6, 1, CYD_CYAN);
+    text_right(c, clock, CYD_LCD_H_RES - 8, 5, 1, CYD_CYAN);
     char place[24];
     snprintf(place, sizeof(place), "%.20s", s_cfg.place);
     text_right(c, place, CYD_LCD_H_RES - 8, 18, 1, CYD_GREY);
@@ -963,11 +972,12 @@ static void draw_screen(cyd_canvas_t *c, void *ctx)
         footer_rect(i, &x, &w);
         bool active = i == (int)s_screen;
         bool armed = i == 3 && esp_timer_get_time() < s_exit_armed_until;
-        uint16_t bg = armed ? CYD_RED : (active ? CYD_CYAN : CYD_PANEL);
+        uint16_t bg = armed ? CYD_RED : (active ? CYD_RGB(20, 76, 91) : CYD_RGB(20, 29, 43));
         const char *label = armed ? "AGAIN" : FOOTER[i];
         cyd_fill_rect(c, x, FOOTER_Y, w, FOOTER_H, bg);
+        if (active || armed) cyd_fill_rect(c, x, FOOTER_Y, w, 2, armed ? CYD_RED : CYD_CYAN);
         cyd_draw_text(c, label, x + (w - cyd_text_width(label, 1)) / 2, FOOTER_Y + 9, 1,
-                      (active || armed) ? CYD_BLACK : CYD_WHITE);
+                      (active || armed) ? CYD_WHITE : CYD_GREY);
     }
 }
 
