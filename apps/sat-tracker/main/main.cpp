@@ -28,6 +28,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net.h"
@@ -175,7 +176,7 @@ static void draw_status(cyd_canvas_t *c, void *ctx)
     text_center(c, s_status.title, 92, 2, s_status.color);
     text_center(c, s_status.line1, 124, 1, CYD_WHITE);
     text_center(c, s_status.line2, 140, 1, CYD_GREY);
-    if (s_status.color == CYD_RED) text_center(c, "TAP OR HOLD BOOT TO EXIT", 210, 1, CYD_GREY);
+    text_center(c, s_status.color == CYD_RED ? "TAP THE SCREEN TO EXIT" : "HOLD THE SCREEN 2 S TO EXIT", 210, 1, CYD_GREY);
 }
 
 static void show_status(const char *title, const char *line1, const char *line2, uint16_t color)
@@ -187,15 +188,57 @@ static void show_status(const char *title, const char *line1, const char *line2,
     cyd_display_render(draw_status, NULL);
 }
 
+/* ---------- Touch (its own task, so leaving always works) ---------- */
+
+/*
+ * One task owns the touch screen. It posts taps to the UI loop and returns to the
+ * launcher when the screen is held for 2 seconds, so the app can be left by touch
+ * even during start-up (Wi-Fi, downloads) or if the UI ever stops responding.
+ * On error screens any tap leaves.
+ */
+#define EXIT_HOLD_US 2000000
+
+struct tap_t {
+    int x, y;
+};
+
+static QueueHandle_t s_taps;
+static volatile bool s_exit_on_tap;
+
+static void touch_task(void *arg)
+{
+    bool was = false;
+    int64_t since = 0;
+    for (;;) {
+        int x, y;
+        bool now = cyd_touch_read(&x, &y);
+        int64_t t = esp_timer_get_time();
+        if (now && !was) {
+            since = t;
+            if (s_exit_on_tap) cyd_platform_return_to_launcher();
+            tap_t tap = {x, y};
+            xQueueSend(s_taps, &tap, 0);
+        }
+        if (now && t - since > EXIT_HOLD_US) cyd_platform_return_to_launcher();
+        was = now;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static void start_touch_task(void)
+{
+    s_taps = xQueueCreate(8, sizeof(tap_t));
+    xTaskCreatePinnedToCore(touch_task, "touch", 3072, NULL, 5, NULL, 1);
+}
+
 /* Shows an error and waits until the user leaves for the launcher. */
 [[noreturn]] static void fatal(const char *title, const char *line1, const char *line2)
 {
     ESP_LOGE(TAG, "%s: %s %s", title, line1 ? line1 : "", line2 ? line2 : "");
+    s_exit_on_tap = true; /* the touch task leaves on any tap */
     show_status(title, line1, line2, CYD_RED);
     int64_t pressed_since = -1;
     for (;;) {
-        int x, y;
-        if (cyd_touch_read(&x, &y)) cyd_platform_return_to_launcher(); /* any tap */
         if (cyd_button_pressed()) {
             if (pressed_since < 0) pressed_since = esp_timer_get_time();
             if (esp_timer_get_time() - pressed_since > LONG_PRESS_US) cyd_platform_return_to_launcher();
@@ -921,6 +964,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(cyd_display_init());
     ESP_ERROR_CHECK(cyd_touch_init());
     ESP_ERROR_CHECK(cyd_button_init());
+    start_touch_task();
     s_sat_lock = xSemaphoreCreateMutex();
     s_pass_lock = xSemaphoreCreateMutex();
 
@@ -1026,10 +1070,11 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Not enough memory for pass prediction");
     }
 
+    xQueueReset(s_taps); /* ignore taps made while loading */
+
     /* ---------- Main loop ---------- */
     std::vector<int> up;
     int64_t last_update = 0, button_since = -1;
-    bool was_touched = false;
     for (;;) {
         int64_t now = esp_timer_get_time();
         bool dirty = false;
@@ -1041,13 +1086,11 @@ extern "C" void app_main(void)
             dirty = true;
         }
 
-        int tx, ty;
-        bool touched = cyd_touch_read(&tx, &ty);
-        if (touched && !was_touched) {
-            handle_tap(tx, ty, up);
+        tap_t tap;
+        while (xQueueReceive(s_taps, &tap, 0) == pdTRUE) {
+            handle_tap(tap.x, tap.y, up);
             dirty = true;
         }
-        was_touched = touched;
 
         if (cyd_button_pressed()) {
             if (button_since < 0) button_since = now;

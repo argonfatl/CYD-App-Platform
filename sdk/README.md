@@ -53,4 +53,4 @@ If the launcher could reach an NTP server, the clock is already set when your ap
 - Use your own NVS namespace; NVS is shared.
 - Keep large data on the SD card under `/apps/<app-id>/data/`.
 - Make every action possible by touch. The BOOT button may be hidden inside a case, so use it only as an optional shortcut; lists longer than the screen need on-screen scroll buttons.
-- Provide an on-screen way to return to the launcher; RST always works as a fallback.
+- Provide an on-screen way to return to the launcher on every screen, including start-up and error screens. The bundled apps use "hold the screen for 2 seconds" from a separate touch task, so it works even while the app is busy. RST always works as a last resort.
