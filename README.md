@@ -80,6 +80,8 @@ Pushing a `v*` tag by hand still works and publishes a release the same way.
 
 ## Making an app
 
+See the step-by-step [guide to creating apps for the launcher](docs/creating-apps.md), including ESP-IDF and Arduino builds, platform APIs, SD-card installation, and publishing.
+
 Any firmware built for the original ESP32 with 4 MB flash can run, as long as it:
 
 - fits in the 2.6 MB app slot;

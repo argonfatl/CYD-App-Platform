@@ -1,5 +1,7 @@
 # Publishing an app from your own repository
 
+For app structure, build setup, and the launcher APIs, start with the [app creation guide](creating-apps.md).
+
 Any GitHub repository can offer an app to CYD App Platform. Users add it in the launcher's web page (**GET APPS** → open the address shown on the screen → *GitHub repositories*). Apps from user-added repositories are marked **unreviewed**.
 
 ## What the device looks for
